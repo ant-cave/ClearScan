@@ -23,8 +23,8 @@ class ClearScanUnitTest {
     @Test
     fun appSettings_defaultsMatchClearScanPlan() {
         val settings = AppSettings()
-        assertEquals("English", settings.language)
-        assertEquals("Light", settings.theme)
+        assertEquals("Auto", settings.language)
+        assertEquals("System", settings.theme)
         assertEquals("Internal Storage", settings.defaultSavePath)
         assertFalse(settings.loggedIn)
         assertTrue(settings.passwordMap.isEmpty())

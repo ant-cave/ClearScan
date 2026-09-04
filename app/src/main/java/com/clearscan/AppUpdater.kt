@@ -1,3 +1,13 @@
+/*
+ * ClearScan in-app updater
+ * Copyright (c) 2026 SuiYueMengHen (original code, MIT License)
+ * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * ant-cave modifications: releases are checked against the
+ * ant-cave/ClearScan repository; follow-system language resolution.
+ */
+
 package com.clearscan
 
 import android.app.NotificationChannel
@@ -34,7 +44,7 @@ data class UpdateDownloadState(val status: String = "idle", val downloaded: Long
 
 class GitHubUpdateRepository(private val context: Context) {
     suspend fun checkLatest(): UpdateInfo? = withContext(Dispatchers.IO) {
-        val connection = (URL("https://api.github.com/repos/SuiYueMengHen/ClearScan/releases/latest").openConnection() as HttpURLConnection).apply {
+        val connection = (URL("https://api.github.com/repos/ant-cave/ClearScan/releases/latest").openConnection() as HttpURLConnection).apply {
             connectTimeout = 12_000
             readTimeout = 20_000
             setRequestProperty("Accept", "application/vnd.github+json")
@@ -163,7 +173,8 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val update = repo.checkLatest() ?: return Result.success()
         val file = if (prefs.getBoolean("autoDownloadUpdates", true)) repo.download(update) else null
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val chinese = prefs.getString("language", "English") == "中文"
+        val language = prefs.getString("language", "Auto") ?: "Auto"
+        val chinese = language == "中文" || (language == "Auto" && java.util.Locale.getDefault().language.startsWith("zh"))
         manager.createNotificationChannel(NotificationChannel("updates", if (chinese) "应用更新" else "App updates", NotificationManager.IMPORTANCE_DEFAULT))
         val notification = NotificationCompat.Builder(applicationContext, "updates")
             .setSmallIcon(com.clearscan.R.drawable.ic_launcher)

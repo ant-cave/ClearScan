@@ -1,11 +1,11 @@
 /*
  * ClearScan app module
+ * Copyright (c) 2026 SuiYueMengHen (original code, MIT License)
  * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Based on ClearScan by SuiYueMengHen (MIT License).
  * ant-cave modifications: OpenCV-accelerated filters, cloud translation API,
- * local llama.cpp inference removed.
+ * local llama.cpp inference removed, single app flavor.
  */
 
 plugins {
@@ -22,8 +22,8 @@ android {
         applicationId = "com.clearscan"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -65,15 +65,6 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
-    }
-
-    flavorDimensions += "model"
-    productFlavors {
-        create("downloadModel") {
-            dimension = "model"
-            applicationIdSuffix = ".download"
-            versionNameSuffix = "-download"
-        }
     }
 }
 

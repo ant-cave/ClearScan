@@ -1,9 +1,9 @@
 /*
  * ClearScan build configuration
+ * Copyright (c) 2026 SuiYueMengHen (original code, MIT License)
  * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Based on ClearScan by SuiYueMengHen (MIT License).
  * ant-cave modifications: use official Maven repositories, drop llama.cpp module.
  */
 

@@ -1,12 +1,13 @@
 # ClearScan branch CI workflow
 # Copyright (c) 2026 ant-cave <antmmmmm@126.com>
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
 name: Branch Debug Build
 
 on:
   push:
     branches:
+      - main
       - optimize-filters-cloud-api
   workflow_dispatch:
 
@@ -25,12 +26,12 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v3
       - name: Unit tests
-        run: ./gradlew testDownloadModelDebugUnitTest
+        run: ./gradlew testDebugUnitTest
       - name: Build debug APK
-        run: ./gradlew assembleDownloadModelDebug
+        run: ./gradlew assembleDebug
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ClearScan-debug-apk
-          path: app/build/outputs/apk/downloadModel/debug/app-downloadModel-debug.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30

@@ -1,13 +1,15 @@
 /*
  * ClearScan main activity and view model
+ * Copyright (c) 2026 SuiYueMengHen (original code, MIT License)
  * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * Based on ClearScan by SuiYueMengHen (MIT License).
  * ant-cave modifications:
  *  - OpenCV-accelerated document filters (adaptive threshold, unsharp mask, white balance)
  *  - Cloud translation via OpenAI-compatible chat APIs (DeepSeek, Kimi, Qwen, ...)
  *  - Local llama.cpp / Hy-MT2 inference removed in favor of the cloud engine
+ *  - Follow-system language and light/dark theme
  */
 
 package com.clearscan
@@ -69,6 +71,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -396,7 +399,7 @@ private fun selectionHint(tool: String): String {
 }
 
 private fun selectionHint(tool: String, settings: AppSettings): String {
-    if (settings.language != "中文") return selectionHint(tool)
+    if (!isChineseUi(settings)) return selectionHint(tool)
     val min = minSelectionFor(tool)
     val types = requiredTypesFor(tool).joinToString("/")
     return if (min > 1) "请先选择至少 $min 个 $types 文件。" else "请先选择一个 $types 文件。"
@@ -418,8 +421,19 @@ private fun toolLabel(tool: String, settings: AppSettings): String = when (tool)
     else -> tool
 }
 
+fun isChineseUi(settings: AppSettings): Boolean {
+    if (settings.language == "中文") return true
+    if (settings.language == "Auto") return Locale.getDefault().language.startsWith("zh")
+    return false
+}
+
 fun tr(settings: AppSettings, english: String, chinese: String): String {
-    return if (settings.language == "中文") chinese else english
+    return if (isChineseUi(settings)) chinese else english
+}
+
+@Composable
+fun isDarkTheme(settings: AppSettings): Boolean {
+    return settings.theme == "Dark" || (settings.theme == "System" && isSystemInDarkTheme())
 }
 
 class MainActivity : ComponentActivity() {
@@ -438,8 +452,8 @@ class MainActivity : ComponentActivity() {
 }
 
 data class AppSettings(
-    val language: String = "English",
-    val theme: String = "Light",
+    val language: String = "Auto",
+    val theme: String = "System",
     val loggedIn: Boolean = false,
     val accountName: String = "Guest",
     val accountEmail: String = "",
@@ -603,7 +617,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         if (clean.isBlank()) return
         val state = navFlow.value
         if (state.folders.any { it.parentId == state.currentFolderId && it.name.equals(clean, true) }) {
-            navFlow.value = state.copy(captureMessage = if (state.settings.language == "中文") "同级目录下已存在同名文件夹" else "A folder with this name already exists here")
+            navFlow.value = state.copy(captureMessage = if (isChineseUi(state.settings)) "同级目录下已存在同名文件夹" else "A folder with this name already exists here")
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -668,7 +682,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     fun changeScanMode(mode: ScanMode) {
         val state = navFlow.value
         if (state.draftPages.isNotEmpty()) {
-            navFlow.value = state.copy(captureMessage = if (state.settings.language == "中文") "请先完成或退出当前多页扫描" else "Finish or exit the current multi-page scan first")
+            navFlow.value = state.copy(captureMessage = if (isChineseUi(state.settings)) "请先完成或退出当前多页扫描" else "Finish or exit the current multi-page scan first")
             return
         }
         val previousSessionId = state.scanSessionId
@@ -861,7 +875,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         navFlow.value = navFlow.value.copy(
             scanSessionId = sessionId,
             draftPages = pages,
-            captureMessage = if (state.settings.language == "中文") "已拍摄 ${pages.size} 页" else "${pages.size} page${if (pages.size == 1) "" else "s"} captured",
+            captureMessage = if (isChineseUi(state.settings)) "已拍摄 ${pages.size} 页" else "${pages.size} page${if (pages.size == 1) "" else "s"} captured",
         )
         if (shouldOpenCropAfterCapture(state.scanMode, state.documentCaptureMode) && added.isNotEmpty()) {
             openDraftPage(added.first(), pages.indexOfFirst { it.id == added.first().id })
@@ -1303,9 +1317,9 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 checkingUpdate = false,
                 updateInfo = info,
                 captureMessage = when {
-                    result.isFailure -> if (settingsFlow.value.language == "中文") "检查更新失败：${result.exceptionOrNull()?.message}" else "Update check failed: ${result.exceptionOrNull()?.message}"
-                    info == null -> if (settingsFlow.value.language == "中文") "当前已是最新版本" else "ClearScan is up to date"
-                    else -> if (settingsFlow.value.language == "中文") "发现新版本 ${info.version}" else "Version ${info.version} is available"
+                    result.isFailure -> if (isChineseUi(settingsFlow.value)) "检查更新失败：${result.exceptionOrNull()?.message}" else "Update check failed: ${result.exceptionOrNull()?.message}"
+                    info == null -> if (isChineseUi(settingsFlow.value)) "当前已是最新版本" else "ClearScan is up to date"
+                    else -> if (isChineseUi(settingsFlow.value)) "发现新版本 ${info.version}" else "Version ${info.version} is available"
                 },
             )
             if (info != null && (downloadAutomatically || settingsFlow.value.autoDownloadUpdates)) downloadUpdate(info)
@@ -1409,7 +1423,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun translateText() {
         val state = navFlow.value.translationState
-        val chinese = settingsFlow.value.language == "中文"
+        val chinese = isChineseUi(settingsFlow.value)
         if (state.inputText.isBlank()) {
             AppLogger.w("Translate", "Translate requested with blank input")
             navFlow.value = navFlow.value.copy(translationState = state.copy(error = if (chinese) "请输入要翻译的文本。" else "Enter text to translate."))
@@ -1637,12 +1651,12 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                         selectedToolIds = emptySet(),
                         scanBitmap = ImageProcessor.readBitmap(result.thumbnailPath),
                         processedBitmap = ImageProcessor.readBitmap(result.thumbnailPath),
-                        captureMessage = "${toolLabel(tool, settingsFlow.value)} ${if (settingsFlow.value.language == "中文") "已完成" else "complete"}",
+                        captureMessage = "${toolLabel(tool, settingsFlow.value)} ${if (isChineseUi(settingsFlow.value)) "已完成" else "complete"}",
                     )
                 }
             } else {
                 AppLogger.w("Tool", "$tool failed")
-                navFlow.value = navFlow.value.copy(busy = false, captureMessage = if (settingsFlow.value.language == "中文") "${toolLabel(tool, settingsFlow.value)} 失败，请选择有效文件。" else "$tool failed. Please choose a valid file.")
+                navFlow.value = navFlow.value.copy(busy = false, captureMessage = if (isChineseUi(settingsFlow.value)) "${toolLabel(tool, settingsFlow.value)} 失败，请选择有效文件。" else "$tool failed. Please choose a valid file.")
             }
         }
     }
@@ -1784,8 +1798,8 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             .filter { it.second.isNotBlank() }
             .toMap()
         return AppSettings(
-            language = prefs.getString("language", "English") ?: "English",
-            theme = prefs.getString("theme", "Light") ?: "Light",
+            language = prefs.getString("language", "Auto") ?: "Auto",
+            theme = prefs.getString("theme", "System") ?: "System",
             loggedIn = prefs.getBoolean("loggedIn", false),
             accountName = prefs.getString("accountName", "Guest") ?: "Guest",
             accountEmail = prefs.getString("accountEmail", "") ?: "",
@@ -1863,7 +1877,7 @@ fun ClearScanApp(model: ClearScanViewModel) {
     CompositionLocalProvider(
         LocalDensity provides Density(density = density.density * 0.88f, fontScale = density.fontScale * 0.9f)
     ) {
-        val colors = if (state.settings.theme == "Dark") {
+        val colors = if (isDarkTheme(state.settings)) {
             androidx.compose.material3.darkColorScheme(primary = Teal, secondary = TealDark, background = ComposeColor(0xFF111317), surface = ComposeColor(0xFF181B20), onSurface = ComposeColor(0xFFF4F6F8))
         } else {
             androidx.compose.material3.lightColorScheme(primary = Teal, secondary = TealDark, background = ComposeColor.White, surface = ComposeColor.White, onSurface = TextDark)
@@ -2043,7 +2057,7 @@ fun HomeScreen(state: UiState, model: ClearScanViewModel) {
 
 @Composable
 fun HeroCard(settings: AppSettings) {
-    val dark = settings.theme == "Dark"
+    val dark = isDarkTheme(settings)
     Card(
         Modifier.fillMaxWidth().height(190.dp),
         shape = RoundedCornerShape(14.dp),
@@ -2625,7 +2639,7 @@ fun DocumentOnTable() {
 @Composable
 fun CropScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
-    val dark = settings.theme == "Dark"
+    val dark = isDarkTheme(settings)
     Column(Modifier.fillMaxSize().background(if (dark) ComposeColor(0xFF111317) else MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Crop", "裁剪"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::applyCropAndEdit, dark = dark)
         Box(Modifier.weight(1f).fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
@@ -3515,8 +3529,8 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
     LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = if (embedded) 24.dp else 12.dp, bottom = 122.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { TopTitle(tr(settings, "Settings", "设置"), if (embedded) null else model::back) }
         item { SettingRow(label = tr(settings, "My Account", "我的账号"), icon = Icons.Default.AccountCircle, value = if (settings.loggedIn) settings.accountName else tr(settings, "Sign in", "登录"), onClick = model::openAccount) }
-        item { SettingRow(label = tr(settings, "Language", "语言"), icon = Icons.Default.Language, value = settings.language, onClick = { activeDialog = "language" }) }
-        item { SettingRow(label = tr(settings, "Theme", "主题"), icon = Icons.Default.Brightness6, value = tr(settings, settings.theme, if (settings.theme == "Light") "日间" else "夜间"), onClick = { activeDialog = "theme" }) }
+        item { SettingRow(label = tr(settings, "Language", "语言"), icon = Icons.Default.Language, value = if (settings.language == "Auto") tr(settings, "Auto (system)", "跟随系统") else settings.language, onClick = { activeDialog = "language" }) }
+        item { SettingRow(label = tr(settings, "Theme", "主题"), icon = Icons.Default.Brightness6, value = when (settings.theme) { "System" -> tr(settings, "Follow system", "跟随系统"); "Dark" -> tr(settings, "Dark", "夜间"); else -> tr(settings, "Light", "日间") }, onClick = { activeDialog = "theme" }) }
         item { SettingRow(label = tr(settings, "Default Save Path", "默认保存路径"), icon = Icons.Default.Folder, value = settings.defaultSavePath, onClick = { activeDialog = "path" }) }
         item { SettingRow(label = tr(settings, "Password Lock", "文件密码锁"), icon = Icons.Default.Lock, value = tr(settings, "${settings.passwordMap.size} protected", "已保护 ${settings.passwordMap.size} 个文件"), onClick = { activeDialog = "password" }) }
         item {
@@ -3556,15 +3570,17 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
     }
     if (activeDialog == "language") ChoiceDialog(settings,
         title = tr(settings, "Language", "语言"),
-        options = listOf("English", "中文"),
+        options = listOf("Auto", "English", "中文"),
         selected = settings.language,
+        label = { option -> if (option == "Auto") tr(settings, "Auto (follow system)", "跟随系统") else option },
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(language = it)); activeDialog = null },
     )
     if (activeDialog == "theme") ChoiceDialog(settings,
         title = tr(settings, "Theme", "主题"),
-        options = listOf("Light", "Dark"),
+        options = listOf("System", "Light", "Dark"),
         selected = settings.theme,
+        label = { option -> when (option) { "System" -> tr(settings, "Follow system", "跟随系统"); "Light" -> tr(settings, "Light", "日间"); else -> tr(settings, "Dark", "夜间") } },
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(theme = it)); activeDialog = null },
     )
@@ -3579,7 +3595,7 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
 }
 
 @Composable
-fun ChoiceDialog(settings: AppSettings, title: String, options: List<String>, selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
+fun ChoiceDialog(settings: AppSettings, title: String, options: List<String>, selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit, label: (String) -> String = { it }) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, color = MaterialTheme.colorScheme.onSurface) },
@@ -3590,7 +3606,7 @@ fun ChoiceDialog(settings: AppSettings, title: String, options: List<String>, se
                         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (option == selected) Soft.copy(alpha = if (MaterialTheme.colorScheme.background == ComposeColor.White) 1f else .16f) else ComposeColor.Transparent).clickable { onSelect(option) }.padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(option, Modifier.weight(1f), fontSize = 17.sp, fontWeight = if (option == selected) FontWeight.Bold else FontWeight.Normal, color = MaterialTheme.colorScheme.onSurface)
+                        Text(label(option), Modifier.weight(1f), fontSize = 17.sp, fontWeight = if (option == selected) FontWeight.Bold else FontWeight.Normal, color = MaterialTheme.colorScheme.onSurface)
                         if (option == selected) Icon(Icons.Default.Check, null, tint = Teal)
                     }
                 }
@@ -3695,6 +3711,7 @@ fun HelpCard(title: String, body: String) {
 @Composable
 fun AboutScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding().padding(horizontal = 24.dp)) {
         TopTitle(tr(settings, "About", "关于"), model::back)
         Spacer(Modifier.height(80.dp))
@@ -3712,23 +3729,29 @@ fun AboutScreen(state: UiState, model: ClearScanViewModel) {
         Spacer(Modifier.height(58.dp))
         OptionRow(tr(settings, "Privacy Policy", "隐私政策"), Icons.Default.Lock) { model.openLegal("Privacy Policy") }
         OptionRow(tr(settings, "Terms of Use", "使用条款"), Icons.Default.Description) { model.openLegal("Terms of Use") }
+        OptionRow(tr(settings, "Source Code (GitHub)", "源代码（GitHub）"), Icons.Default.Language) {
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ant-cave/ClearScan"))) }
+        }
+        OptionRow(tr(settings, "Open Source License", "开源许可证"), Icons.Default.Info) { model.openLegal("Open Source License") }
         Spacer(Modifier.weight(1f))
-        Text(tr(settings, "© 2024 ClearScan. All rights reserved.", "© 2024 ClearScan。保留所有权利。"), Modifier.fillMaxWidth().padding(bottom = 34.dp), textAlign = TextAlign.Center, color = Muted)
+        Text(tr(settings, "© 2026 ClearScan · AGPL-3.0\nBased on ClearScan by SuiYueMengHen (MIT)", "© 2026 ClearScan · AGPL-3.0\n基于 SuiYueMengHen 的 ClearScan（MIT）"), Modifier.fillMaxWidth().padding(bottom = 34.dp), textAlign = TextAlign.Center, color = Muted, fontSize = 14.sp, lineHeight = 21.sp)
     }
 }
 
 @Composable
 fun LegalScreen(state: UiState, model: ClearScanViewModel) {
-    val privacy = state.legalTitle == "Privacy Policy"
+    val title = state.legalTitle
+    val privacy = title == "Privacy Policy"
+    val license = title == "Open Source License"
     val settings = state.settings
     LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { TopTitle(if (privacy) tr(settings, "Privacy Policy", "隐私政策") else tr(settings, "Terms of Use", "使用条款"), model::back) }
+        item { TopTitle(when { privacy -> tr(settings, "Privacy Policy", "隐私政策"); license -> tr(settings, "Open Source License", "开源许可证"); else -> tr(settings, "Terms of Use", "使用条款") }, model::back) }
         item {
             Text(
-                if (privacy) {
-                    tr(settings, "ClearScan stores scans, passwords, account profile data, and settings locally on this device. Files are not uploaded to a server in this clean local edition. Camera and media permissions are used only for scanning, importing, exporting, sharing, and printing documents. You can delete documents from the Docs page and clear local account state with Log Out.", "ClearScan 会将扫描文件、密码、账号资料和设置保存在本设备本地。纯净本地版不会把文件上传到服务器。相机和媒体权限仅用于扫描、导入、导出、分享和打印文档。你可以在文档页删除文件，也可以通过退出登录清除本地账号状态。")
-                } else {
-                    tr(settings, "ClearScan is provided as a local document scanning tool. You are responsible for the content you scan, export, share, or print. PDF tools create new local files and do not modify originals unless you delete them. Password protection is local to this app and should not be treated as enterprise encryption. By using the app, you agree to use it lawfully and keep backups of important documents.", "ClearScan 是一个本地文档扫描工具。你需要对自己扫描、导出、分享或打印的内容负责。PDF 工具会生成新的本地文件，不会覆盖原文件，除非你主动删除。文件密码保护仅在本应用内本地生效，不应视为企业级加密。使用本应用即表示你同意合法使用，并自行备份重要文档。")
+                when {
+                    privacy -> tr(settings, "ClearScan stores scans, passwords, account profile data, and settings locally on this device. Files are not uploaded to a server in this clean local edition. Camera and media permissions are used only for scanning, importing, exporting, sharing, and printing documents. You can delete documents from the Docs page and clear local account state with Log Out. Cloud translation, if used, sends the text you submit to the third-party API you configure, and your API key stays on this device.", "ClearScan 会将扫描文件、密码、账号资料和设置保存在本设备本地。纯净本地版不会把文件上传到服务器。相机和媒体权限仅用于扫描、导入、导出、分享和打印文档。你可以在文档页删除文件，也可以通过退出登录清除本地账号状态。若使用云端翻译，所提交的文本将发送到你自行配置的第三方 API，API 密钥仅保存在本设备。")
+                    license -> tr(settings, "ClearScan is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License v3.0 (AGPL-3.0-or-later) as published by the Free Software Foundation. This project is based on ClearScan by SuiYueMengHen, originally released under the MIT License; the upstream MIT notice is preserved in the LICENSE file. The full license text is available at https://www.gnu.org/licenses/agpl-3.0.html and in the source repository: https://github.com/ant-cave/ClearScan", "ClearScan 是自由软件：你可以依据自由软件基金会发布的 GNU Affero 通用公共许可证 v3.0（AGPL-3.0-or-later）条款重新分发或修改它。本项目基于 SuiYueMengHen 的 ClearScan（原始许可证为 MIT），上游 MIT 声明保留在 LICENSE 文件中。完整许可证文本见 https://www.gnu.org/licenses/agpl-3.0.html 及源代码仓库：https://github.com/ant-cave/ClearScan")
+                    else -> tr(settings, "ClearScan is provided as a local document scanning tool. You are responsible for the content you scan, export, share, or print. PDF tools create new local files and do not modify originals unless you delete them. Password protection is local to this app and should not be treated as enterprise encryption. By using the app, you agree to use it lawfully and keep backups of important documents.", "ClearScan 是一个本地文档扫描工具。你需要对自己扫描、导出、分享或打印的内容负责。PDF 工具会生成新的本地文件，不会覆盖原文件，除非你主动删除。文件密码保护仅在本应用内本地生效，不应视为企业级加密。使用本应用即表示你同意合法使用，并自行备份重要文档。")
                 },
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 16.sp,
@@ -3783,7 +3806,7 @@ fun AppLogsScreen(state: UiState, model: ClearScanViewModel) {
             )
         }
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = if (settings.theme == "Dark") ComposeColor(0xFF111820) else ComposeColor(0xFFF8FAFC)), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
+            Card(colors = CardDefaults.cardColors(containerColor = if (isDarkTheme(settings)) ComposeColor(0xFF111820) else ComposeColor(0xFFF8FAFC)), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
                 Text(
                     state.logText.ifBlank { tr(settings, "No logs yet.", "暂无日志。") },
                     Modifier.fillMaxWidth().padding(14.dp),

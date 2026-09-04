@@ -1,14 +1,16 @@
 # ClearScan
 
-**A local-first Android document scanner with real-time edge guidance, multi-page workflows, PDF tools, and on-device translation.**
+**A local-first Android document scanner with real-time edge guidance, multi-page workflows, PDF tools, and cloud AI translation.**
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[Download the latest release](https://github.com/SuiYueMengHen/ClearScan/releases/latest) | [Report an issue](https://github.com/SuiYueMengHen/ClearScan/issues) | [View source](https://github.com/SuiYueMengHen/ClearScan)
+[Download the latest release](https://github.com/ant-cave/ClearScan/releases/latest) | [Report an issue](https://github.com/ant-cave/ClearScan/issues) | [View source](https://github.com/ant-cave/ClearScan)
 
-ClearScan is a native Android scanner built with Kotlin and Jetpack Compose. It keeps scans and document processing on the device, provides automatic and manual perspective correction, and combines everyday PDF utilities with optional offline multilingual translation.
+ClearScan is a native Android scanner built with Kotlin and Jetpack Compose. It keeps scans and document processing on the device, provides automatic and manual perspective correction, and combines everyday PDF utilities with optional cloud AI translation through any OpenAI-compatible API.
 
-> Current release: **v1.0.3**. Public APKs target ARM64 devices running Android 8.0 or newer.
+> Current release: **v1.1.0**. Public APKs target ARM64 devices running Android 8.0 or newer.
+
+This is the ant-cave edition of ClearScan, maintained independently at [ant-cave/ClearScan](https://github.com/ant-cave/ClearScan). It is based on the original project by SuiYueMengHen, with OpenCV-accelerated filters, cloud translation, and a fully automatic release pipeline.
 
 ## Highlights
 
@@ -17,12 +19,12 @@ ClearScan is a native Android scanner built with Kotlin and Jetpack Compose. It 
 | Capture | CameraX preview, real-time document boundary guidance, flash and lens controls, single-page and multi-page sessions |
 | Alignment | OpenCV edge detection, confidence-based fallback, four-corner manual adjustment, high-resolution perspective correction |
 | Editing | Rotation, brightness, contrast, saturation, document enhancement, high-quality cached filter previews |
-| Filters | Auto, Clean, White Paper, B&W, Ink, Magic Color, Photo, Gray, Soft Gray, and High Contrast |
+| Filters | Auto, Clean, White Paper, B&W, Ink, Magic Color, Photo, Gray, Soft Gray, and High Contrast — B&W/Ink use OpenCV adaptive thresholding, sharpen uses an OpenCV unsharp mask, and white balance uses OpenCV statistics, all dramatically faster than per-pixel loops |
 | Documents | Local library, search, nested folders, rename, move, delete, share, print, and password protection |
 | PDF tools | Image to PDF, PDF to image, merge, split, compress, page-level editing, watermark, and signature overlays |
 | Codes | Bundled ML Kit QR and barcode recognition, safe URL opening, copy, and web search actions |
-| Translation | Optional Hy-MT2 GGUF download and local inference through a llama.cpp Android runtime |
-| Application | English and Simplified Chinese, light and dark themes, in-app update checks, TXT and DOCX log export |
+| Translation | Cloud AI translation through any OpenAI-compatible chat API (DeepSeek, OpenAI, Kimi, Qwen, OpenRouter, Ollama, ...) — configure base URL, API key, and model in-app; long texts are split and translated in chunks with progress |
+| Application | Follows system language (English/简体中文) and system light/dark theme by default, manual overrides available, in-app update checks against this repository, TXT and DOCX log export |
 
 ## Scan Pipeline
 
@@ -34,18 +36,24 @@ ClearScan is a native Android scanner built with Kotlin and Jetpack Compose. It 
 
 If a device cannot bind CameraX preview, capture, and analysis simultaneously, ClearScan falls back to preview and capture instead of terminating the camera workflow.
 
-## Translation Model
+## Cloud Translation
 
-The Hy-MT2 model is not bundled in the APK. It is downloaded on first use from a selectable source and stored in the application-private model directory. The application validates the GGUF file before loading it.
+Translation runs on the cloud engine of your choice. Any OpenAI-compatible `/chat/completions` endpoint works:
 
-Local translation currently requires an ARM64 device with enough free storage and memory for the approximately 1.1 GB Q4 model. Scanning, PDF tools, and document management do not require the translation model.
+- DeepSeek (`https://api.deepseek.com`, `deepseek-chat`) — the default
+- OpenAI, Kimi (Moonshot), Qwen (DashScope), OpenRouter, local Ollama instances, and more
+
+Enter the base URL, API key, and model name on the Translate screen and start translating. Your key is stored only on the device and is sent only to the endpoint you configure. Text is split into chunks automatically for very long inputs.
+
+The previous local Hy-MT2 / llama.cpp inference engine has been removed in this edition, which shrinks the APK by roughly 300 MB and removes all native compilation from the build.
 
 ## Privacy
 
-- Documents, page images, settings, logs, and downloaded models are stored locally.
-- ClearScan does not require a ClearScan cloud account.
-- Scanned documents are not uploaded to a ClearScan server.
-- Files leave the application only after an explicit share, export, link-opening, model-download, or update action.
+- Documents, page images, settings, and logs are stored locally.
+- ClearScan does not require a cloud account.
+- Scanned documents are not uploaded to any server.
+- Files leave the application only after an explicit share, export, link-opening, or update action.
+- Cloud translation, if used, sends only the text you submit to the API you configure.
 - Application logs record operational metadata and errors, not copies of scanned page content.
 
 ## Compatibility
@@ -57,44 +65,33 @@ Local translation currently requires an ARM64 device with enough free storage an
 | Public release ABI | `arm64-v8a` |
 | Build JDK | JDK 17 |
 | Android SDK | SDK 36 |
-| Native toolchain | Android NDK and CMake |
 
-The automated and instrumented test suite has been exercised on an ARM64 device running Android 16. Camera capabilities and native inference performance can still vary by manufacturer, so physical-device verification is recommended before production deployment.
+Camera capabilities can vary by manufacturer, so physical-device verification is recommended before production deployment.
 
 ## Install
 
-Download the signed APK and checksum from the [v1.0.3 release](https://github.com/SuiYueMengHen/ClearScan/releases/tag/v1.0.3):
+Download the signed APK and checksum from the [releases page](https://github.com/ant-cave/ClearScan/releases/latest):
 
-- `ClearScan-v1.0.3-arm64-v8a.apk`
-- `ClearScan-v1.0.3-arm64-v8a.apk.sha256`
+- `ClearScan-vX.Y.Z-arm64-v8a.apk`
+- `ClearScan-vX.Y.Z-arm64-v8a.apk.sha256`
 
-Version 1.0.3 introduces the permanent ClearScan release certificate. A debug-signed v1.0.2 installation cannot be upgraded in place. Export important documents, uninstall the old debug build, and then install v1.0.3. Later releases signed with the same certificate can upgrade normally.
+Releases from this repository are signed with the ClearScan release certificate of this fork. If you are upgrading from a different build (for example the original upstream APK), export important documents, uninstall the old build, and then install this one.
 
 ## Build From Source
 
 ```bash
-git clone https://github.com/SuiYueMengHen/ClearScan.git
+git clone https://github.com/ant-cave/ClearScan.git
 cd ClearScan
-./gradlew testDownloadModelDebugUnitTest :app:assembleDownloadModelDebug
+./gradlew testDebugUnitTest :app:assembleDebug
 ```
 
 The debug APK is written to:
 
 ```text
-app/build/outputs/apk/downloadModel/debug/app-downloadModel-debug.apk
+app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Run the full local verification suite with:
-
-```bash
-./gradlew testDownloadModelDebugUnitTest lintDownloadModelDebug :app:assembleDownloadModelDebug
-```
-
-With an authorized Android device connected, run instrumented tests with:
-
-```bash
-./gradlew connectedDownloadModelDebugAndroidTest
-```
+No Android NDK or CMake installation is required — the project contains no native sources.
 
 ## Release Signing
 
@@ -107,7 +104,7 @@ CLEARSCAN_KEY_ALIAS
 CLEARSCAN_KEY_PASSWORD
 ```
 
-The signing key must never be committed to the repository. The tag-triggered GitHub workflow runs only when the repository variable `RELEASE_SIGNING_CONFIGURED` is set to `true`. Maintainers may instead sign locally and upload only the signed APK and checksum.
+The signing key is never committed to the repository. Pushing a `v*` tag triggers the [release workflow](.github/workflows/release.yml), which runs unit tests, builds the signed release APK, and publishes it together with its SHA-256 checksum as a GitHub release automatically.
 
 ## Project Structure
 
@@ -122,8 +119,6 @@ app/src/main/java/com/clearscan/
   AppUpdater.kt               GitHub release update flow
   SettingsRepository.kt       DataStore-backed application settings
   LogExporter.kt              TXT and DOCX log export
-
-third_party/llama.cpp/         Native inference runtime source
 ```
 
 ## Known Limitations
@@ -131,7 +126,7 @@ third_party/llama.cpp/         Native inference runtime source
 - Public release APKs currently target ARM64 only.
 - PDF editing is page-oriented; it is not an Acrobat-style text-layout editor.
 - Real-time edge guidance may fall back to capture-only mode on constrained Camera2 implementations.
-- Hy-MT2 startup time and throughput depend heavily on device memory bandwidth and CPU support.
+- Cloud translation quality and latency depend on the provider you configure; translation requires network connectivity.
 
 ## Contributing
 
@@ -139,8 +134,10 @@ Bug reports, reproducible device-specific camera logs, detection fixtures, and f
 
 ## Third-Party Software
 
-ClearScan uses CameraX, Jetpack Compose, Room, OpenCV, ML Kit, and a modified llama.cpp Android runtime. The Hy-MT2 model is downloaded separately and remains subject to the model publisher's terms. Review all applicable third-party notices before redistributing the application.
+ClearScan uses CameraX, Jetpack Compose, Room, OpenCV, and ML Kit. Review all applicable third-party notices before redistributing the application.
 
 ## License
 
-ClearScan is released under the [MIT License](LICENSE). Third-party components and downloaded model files remain subject to their respective licenses and terms.
+ClearScan (this edition) is released under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
+
+This project is based on [ClearScan by SuiYueMengHen](https://github.com/SuiYueMengHen/ClearScan), originally released under the MIT License. The upstream MIT notice is preserved in the LICENSE file, as required by its terms.
