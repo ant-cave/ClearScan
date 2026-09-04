@@ -94,6 +94,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
@@ -181,6 +183,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
@@ -202,6 +206,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.Dispatchers
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -214,6 +220,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import org.opencv.android.Utils
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.MatOfByte
+import org.opencv.core.Scalar
+import org.opencv.core.Size as CvSize
+import org.opencv.imgproc.Imgproc
 import java.text.SimpleDateFormat
 import java.net.HttpURLConnection
 import java.net.URL
@@ -233,6 +247,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private val Teal = ComposeColor(0xFF0FA7A0)
@@ -482,6 +497,11 @@ data class TranslationState(
     val progress: Float = 0f,
     val error: String? = null,
     val download: ModelDownloadState = ModelDownloadState(),
+    /** "local" = bundled Hy-MT2 runtime, "cloud" = OpenAI-compatible chat API. */
+    val engine: String = "cloud",
+    val cloudBaseUrl: String = "https://api.deepseek.com",
+    val cloudModel: String = "deepseek-chat",
+    val cloudApiKey: String = "",
 )
 
 data class UiState(
@@ -1586,19 +1606,30 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             navFlow.value = navFlow.value.copy(translationState = state.copy(error = if (chinese) "请输入要翻译的文本。" else "Enter text to translate."))
             return
         }
-        val modelFile = translationModelFile()
-        if (!isValidHyMt2Model(modelFile)) {
-            AppLogger.w("Translate", "Translate requested but model invalid: ${modelFile.absolutePath}, bytes=${modelFile.takeIf { it.exists() }?.length() ?: 0L}")
-            navFlow.value = navFlow.value.copy(
-                translationState = state.copy(
-                    modelStatus = "missing",
-                    error = if (chinese) "模型文件缺失或不完整，请重新下载 Q4_K_M 模型。" else "The Q4_K_M model is missing or incomplete. Download it again.",
+        if (state.engine == "cloud") {
+            if (state.cloudApiKey.isBlank() || state.cloudBaseUrl.isBlank() || state.cloudModel.isBlank()) {
+                navFlow.value = navFlow.value.copy(
+                    translationState = state.copy(
+                        error = if (chinese) "请先填写云端 API 的地址、密钥和模型名称。" else "Fill in the cloud API base URL, key and model first.",
+                    )
                 )
-            )
-            return
+                return
+            }
+        } else {
+            val modelFile = translationModelFile()
+            if (!isValidHyMt2Model(modelFile)) {
+                AppLogger.w("Translate", "Translate requested but model invalid: ${modelFile.absolutePath}, bytes=${modelFile.takeIf { it.exists() }?.length() ?: 0L}")
+                navFlow.value = navFlow.value.copy(
+                    translationState = state.copy(
+                        modelStatus = "missing",
+                        error = if (chinese) "模型文件缺失或不完整，请重新下载 Q4_K_M 模型。" else "The Q4_K_M model is missing or incomplete. Download it again.",
+                    )
+                )
+                return
+            }
         }
         viewModelScope.launch {
-            AppLogger.i("Translate", "Translate start source=${state.sourceLang} target=${state.targetLang} chars=${state.inputText.length}")
+            AppLogger.i("Translate", "Translate start engine=${state.engine} source=${state.sourceLang} target=${state.targetLang} chars=${state.inputText.length}")
             navFlow.value = navFlow.value.copy(
                 translationState = state.copy(
                     isTranslating = true,
@@ -1608,13 +1639,17 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             )
             val translated = runCatching {
-                translateWithHyMt2(state.inputText, state.sourceLang, state.targetLang)
-            }.onFailure { AppLogger.e("Translate", "Hy-MT2 inference failed", it) }.getOrElse { error ->
+                if (state.engine == "cloud") {
+                    translateWithCloudApi(state.inputText, state.sourceLang, state.targetLang, state.cloudBaseUrl.trim(), state.cloudApiKey.trim(), state.cloudModel.trim())
+                } else {
+                    translateWithHyMt2(state.inputText, state.sourceLang, state.targetLang)
+                }
+            }.onFailure { AppLogger.e("Translate", "Translation failed", it) }.getOrElse { error ->
                 navFlow.value = navFlow.value.copy(
                     translationState = navFlow.value.translationState.copy(
                         isTranslating = false,
                         progress = 0f,
-                        error = if (chinese) "翻译失败：${error.message ?: "模型运行错误"}" else "Translation failed: ${error.message ?: "model runtime error"}",
+                        error = if (chinese) "翻译失败：${error.message ?: "运行错误"}" else "Translation failed: ${error.message ?: "runtime error"}",
                     )
                 )
                 return@launch
@@ -1691,6 +1726,119 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         return completed.toString().trim()
     }
 
+    fun setTranslationEngine(engine: String) {
+        val next = if (engine == "cloud") "cloud" else "local"
+        prefs.edit().putString("translationEngine", next).apply()
+        navFlow.value = navFlow.value.copy(
+            translationState = navFlow.value.translationState.copy(engine = next, error = null)
+        )
+        AppLogger.i("Translate", "Engine switched to $next")
+    }
+
+    fun updateTranslationCloudConfig(baseUrl: String, apiKey: String, model: String) {
+        prefs.edit()
+            .putString("translationCloudBaseUrl", baseUrl.trim())
+            .putString("translationCloudApiKey", apiKey.trim())
+            .putString("translationCloudModel", model.trim())
+            .apply()
+        navFlow.value = navFlow.value.copy(
+            translationState = navFlow.value.translationState.copy(
+                cloudBaseUrl = baseUrl,
+                cloudApiKey = apiKey,
+                cloudModel = model,
+            )
+        )
+    }
+
+    /**
+     * Translates via any OpenAI-compatible chat completions endpoint
+     * (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter, Groq, Ollama, ...).
+     * Long inputs are split into chunks so each request stays small.
+     */
+    private suspend fun translateWithCloudApi(
+        input: String,
+        sourceLang: String,
+        targetLang: String,
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+    ): String = withContext(Dispatchers.IO) {
+        require(sourceLang != targetLang || sourceLang == "Auto") { "Source and target languages must be different." }
+        val chunks = splitTranslationText(input, maxChars = 2000)
+        check(chunks.isNotEmpty()) { "Text is empty." }
+        val endpoint = baseUrl.trimEnd('/') + "/chat/completions"
+        val completed = StringBuilder()
+        chunks.forEachIndexed { index, chunk ->
+            val output = requestCloudTranslation(endpoint, apiKey, model, chunk, sourceLang, targetLang)
+            if (completed.isNotEmpty()) completed.append('\n')
+            completed.append(output.trim())
+            navFlow.value = navFlow.value.copy(
+                translationState = navFlow.value.translationState.copy(
+                    progress = .2f + .75f * ((index + 1).toFloat() / chunks.size.toFloat()),
+                )
+            )
+        }
+        completed.toString().trim()
+    }
+
+    private fun requestCloudTranslation(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        text: String,
+        sourceLang: String,
+        targetLang: String,
+    ): String {
+        val sourceLabel = if (sourceLang == "Auto") "auto-detected language" else sourceLang
+        val messages = JSONArray().apply {
+            put(
+                JSONObject().apply {
+                    put("role", "system")
+                    put("content", "You are a professional document translator. Translate the user's text from $sourceLabel into $targetLang. Output ONLY the translation, with no explanations, quotes, or extra formatting. Preserve paragraph breaks.")
+                }
+            )
+            put(
+                JSONObject().apply {
+                    put("role", "user")
+                    put("content", text)
+                }
+            )
+        }
+        val body = JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("temperature", 0.1)
+            put("stream", false)
+        }
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 20_000
+            readTimeout = 120_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+        try {
+            connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val payload = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            if (code !in 200..299) {
+                val detail = runCatching { JSONObject(payload).optJSONObject("error")?.optString("message") }.getOrNull()
+                error("HTTP $code${if (!detail.isNullOrBlank()) ": $detail" else if (payload.isNotBlank()) ": ${payload.take(200)}" else ""}")
+            }
+            val content = JSONObject(payload)
+                .optJSONArray("choices")
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.optString("content")
+            check(!content.isNullOrBlank()) { "Empty response from the API." }
+            return content
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun refreshTranslationModelState() {
         val file = translationModelFile()
         val legacyFile = File(file.parentFile, "hy-mt2-1.8b-1.25bit.gguf")
@@ -1706,6 +1854,10 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             translationState = navFlow.value.translationState.copy(
                 modelStatus = if (ready) "ready" else "missing",
                 selectedSource = sourceId,
+                engine = prefs.getString("translationEngine", "cloud") ?: "cloud",
+                cloudBaseUrl = prefs.getString("translationCloudBaseUrl", "https://api.deepseek.com") ?: "https://api.deepseek.com",
+                cloudModel = prefs.getString("translationCloudModel", "deepseek-chat") ?: "deepseek-chat",
+                cloudApiKey = prefs.getString("translationCloudApiKey", "") ?: "",
                 download = ModelDownloadState(if (ready) "ready" else "missing", sourceId, if (ready) file.length() else 0L, if (ready) file.length() else 0L, progress = if (ready) 1f else 0f),
                 error = if (ready) null else navFlow.value.translationState.error,
             )
@@ -3572,6 +3724,83 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(tr(settings, "Translation Engine", "翻译引擎"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    val engines = listOf(
+                        "cloud" to (tr(settings, "Cloud API (OpenAI-compatible)", "云端 API（OpenAI 兼容）") to tr(settings, "DeepSeek / OpenAI / Kimi / Qwen / OpenRouter / Ollama…", "DeepSeek / OpenAI / Kimi / 通义 / OpenRouter / Ollama…")),
+                        "local" to (tr(settings, "Local Hy-MT2 model", "本地 Hy-MT2 模型") to tr(settings, "Runs on-device; runtime not bundled in this build.", "设备端运行；此构建未打包运行时。")),
+                    )
+                    engines.forEach { (id, labels) ->
+                        val (title, subtitle) = labels
+                        val selected = translation.engine == id
+                        val rowBg = if (selected) Teal.copy(alpha = if (settings.theme == "Dark") .18f else .12f) else sourceTrack.copy(alpha = if (settings.theme == "Dark") .5f else .45f)
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(rowBg)
+                                .border(1.dp, if (selected) Teal.copy(alpha = .35f) else ComposeColor.Transparent, RoundedCornerShape(10.dp))
+                                .clickable { model.setTranslationEngine(id) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(title, color = MaterialTheme.colorScheme.onSurface, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                                Text(subtitle, color = Muted, fontSize = 12.sp)
+                            }
+                            if (selected) Icon(Icons.Default.Check, null, tint = Teal)
+                        }
+                    }
+                }
+            }
+        }
+        if (translation.engine == "cloud") {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(tr(settings, "Cloud API Settings", "云端 API 设置"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        OutlinedTextField(
+                            value = translation.cloudBaseUrl,
+                            onValueChange = { model.updateTranslationCloudConfig(it, translation.cloudApiKey, translation.cloudModel) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(tr(settings, "Base URL", "API 地址")) },
+                            placeholder = { Text("https://api.deepseek.com") },
+                            supportingText = { Text(tr(settings, "The app calls {base}/chat/completions", "实际请求 {base}/chat/completions"), color = Muted, fontSize = 11.sp) },
+                        )
+                        var showKey by remember { mutableStateOf(false) }
+                        OutlinedTextField(
+                            value = translation.cloudApiKey,
+                            onValueChange = { model.updateTranslationCloudConfig(translation.cloudBaseUrl, it, translation.cloudModel) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(tr(settings, "API Key", "API 密钥")) },
+                            visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showKey = !showKey }) {
+                                    Icon(
+                                        if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        tr(settings, "Toggle key visibility", "切换密钥可见性"),
+                                        tint = Muted,
+                                    )
+                                }
+                            },
+                            supportingText = { Text(tr(settings, "Stored only on this device.", "仅保存在本机。"), color = Muted, fontSize = 11.sp) },
+                        )
+                        OutlinedTextField(
+                            value = translation.cloudModel,
+                            onValueChange = { model.updateTranslationCloudConfig(translation.cloudBaseUrl, translation.cloudApiKey, it) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(tr(settings, "Model", "模型名称")) },
+                            placeholder = { Text("deepseek-chat") },
+                        )
+                    }
+                }
+            }
+        } else {
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(tr(settings, "Hy-MT2 Model", "Hy-MT2 模型"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         when (translation.modelStatus) {
@@ -3612,6 +3841,7 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
         }
+        }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SelectField(tr(settings, "From", "源语言"), translation.sourceLang, languages, Modifier.weight(1f), displayValue = { translationLanguageLabel(it, settings) }) { model.setTranslationLanguages(source = it) }
@@ -3646,7 +3876,11 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
                     Text(tr(settings, "Result", "结果"), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         when {
-                            translation.isTranslating -> tr(settings, "Translating locally...", "正在本地翻译...")
+                            translation.isTranslating -> if (translation.engine == "cloud") {
+                                tr(settings, "Translating via cloud API...", "正在通过云端 API 翻译...")
+                            } else {
+                                tr(settings, "Translating locally...", "正在本地翻译...")
+                            }
                             translation.outputText.isNotBlank() -> translation.outputText
                             translation.error != null -> translation.error
                             else -> tr(settings, "Translation output will appear here.", "翻译结果会显示在这里。")
@@ -4430,7 +4664,71 @@ object ImageProcessor {
         return sharpen(adjusted, amount = .72f)
     }
 
+    /** Runs [block] with an RGBA [Mat] of [bitmap]; returns null when OpenCV is unavailable. */
+    private fun <T> withOpenCvMat(bitmap: Bitmap, block: (Mat) -> T?): T? {
+        if (!DocumentEdgeDetector.openCvAvailable || bitmap.width < 3 || bitmap.height < 3) return null
+        val source = Mat()
+        return try {
+            Utils.bitmapToMat(bitmap, source)
+            block(source)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            source.release()
+        }
+    }
+
+    /** Converts an RGBA [Mat] back to a bitmap; returns null on failure. */
+    private fun matToBitmap(mat: Mat): Bitmap? = runCatching {
+        Bitmap.createBitmap(mat.cols(), mat.rows(), Bitmap.Config.ARGB_8888).also { Utils.matToBitmap(mat, it) }
+    }.getOrNull()
+
     private fun grayWorldWhiteBalance(bitmap: Bitmap): Bitmap {
+        grayWorldWhiteBalanceOpenCv(bitmap)?.let { return it }
+        return grayWorldWhiteBalanceFallback(bitmap)
+    }
+
+    /** Gray-world statistics via in-range mask + Core.mean, then the same clamped channel gains. */
+    private fun grayWorldWhiteBalanceOpenCv(bitmap: Bitmap): Bitmap? = withOpenCvMat(bitmap) { source ->
+        val channels = mutableListOf<Mat>()
+        val grayStats = Mat()
+        val mask = Mat()
+        val maxPlane = Mat()
+        val minPlane = Mat()
+        val output = Mat()
+        try {
+            Core.split(source, channels)
+            Core.max(channels[0], channels[1], maxPlane)
+            Core.max(maxPlane, channels[2], maxPlane)
+            Core.min(channels[0], channels[1], minPlane)
+            Core.min(minPlane, channels[2], minPlane)
+            Core.subtract(maxPlane, minPlane, grayStats)
+            // Keep only near-gray pixels: channel spread < 80 and brightness > 48.
+            Core.inRange(grayStats, Scalar(0.0), Scalar(80.0), mask)
+            val bright = Mat()
+            Core.inRange(maxPlane, Scalar(48.0), Scalar(255.0), bright)
+            Core.bitwise_and(mask, bright, mask)
+            bright.release()
+            val samples = Core.countNonZero(mask)
+            if (samples <= 0) return@withOpenCvMat null
+            val averages = channels.map { plane -> Core.mean(plane, mask).`val`[0] }
+            val gray = averages.average()
+            fun gain(average: Double) = (gray / average).coerceIn(.82, 1.18)
+            val transform = Mat.zeros(4, 4, CvType.CV_32FC1)
+            transform.put(0, 0, gain(averages[0]))
+            transform.put(1, 1, gain(averages[1]))
+            transform.put(2, 2, gain(averages[2]))
+            transform.put(3, 3, 1.0)
+            Core.transform(source, output, transform)
+            transform.release()
+            matToBitmap(output)
+        } finally {
+            channels.forEach(Mat::release)
+            listOf(grayStats, mask, maxPlane, minPlane, output).forEach(Mat::release)
+        }
+    }
+
+    private fun grayWorldWhiteBalanceFallback(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         val step = max(1, minOf(width, height) / 360)
@@ -4487,7 +4785,26 @@ object ImageProcessor {
         return Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt().coerceAtLeast(1), (bitmap.height * scale).roundToInt().coerceAtLeast(1), true)
     }
 
-    private fun sharpen(bitmap: Bitmap, amount: Float = 1f): Bitmap {
+    fun sharpen(bitmap: Bitmap, amount: Float = 1f): Bitmap {
+        sharpenOpenCv(bitmap, amount)?.let { return it }
+        return sharpenFallback(bitmap, amount)
+    }
+
+    /** Unsharp mask: out = src + (src - blur) * amount, computed with native OpenCV. */
+    private fun sharpenOpenCv(bitmap: Bitmap, amount: Float): Bitmap? = withOpenCvMat(bitmap) { source ->
+        val blurred = Mat()
+        val output = Mat()
+        try {
+            Imgproc.GaussianBlur(source, blurred, CvSize(3.0, 3.0), 0.0)
+            Core.addWeighted(source, 1.0 + amount.toDouble(), blurred, -amount.toDouble(), 0.0, output)
+            matToBitmap(output)
+        } finally {
+            blurred.release()
+            output.release()
+        }
+    }
+
+    private fun sharpenFallback(bitmap: Bitmap, amount: Float = 1f): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         if (width < 3 || height < 3) return bitmap
@@ -4556,8 +4873,31 @@ object ImageProcessor {
 
     private fun whitePaper(bitmap: Bitmap): Bitmap {
         val balanced = grayWorldWhiteBalance(bitmap)
-        val pixels = IntArray(balanced.width * balanced.height)
-        balanced.getPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
+        whitePaperOpenCv(balanced)?.let { return it }
+        return whitePaperFallback(balanced)
+    }
+
+    /** Levels lift ((c-14)/224)^0.88 applied through a 256-entry native LUT. */
+    private fun whitePaperOpenCv(bitmap: Bitmap): Bitmap? = withOpenCvMat(bitmap) { source ->
+        val table = MatOfByte()
+        val output = Mat()
+        try {
+            val lut = ByteArray(256) { index ->
+                val normalized = ((index - 14f) / 224f).coerceIn(0f, 1f)
+                (255f * Math.pow(normalized.toDouble(), .88)).roundToInt().coerceIn(0, 255).toByte()
+            }
+            table.fromArray(*lut)
+            Core.LUT(source, table, output)
+            matToBitmap(output)
+        } finally {
+            table.release()
+            output.release()
+        }
+    }
+
+    private fun whitePaperFallback(bitmap: Bitmap): Bitmap {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         fun lift(channel: Int): Int {
             val normalized = ((channel - 14f) / 224f).coerceIn(0f, 1f)
             return (255f * Math.pow(normalized.toDouble(), .88)).roundToInt().coerceIn(0, 255)
@@ -4566,16 +4906,50 @@ object ImageProcessor {
             val color = pixels[index]
             pixels[index] = Color.rgb(lift(Color.red(color)), lift(Color.green(color)), lift(Color.blue(color)))
         }
-        return Bitmap.createBitmap(balanced.width, balanced.height, Bitmap.Config.ARGB_8888).also {
-            it.setPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
+        return Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         }
     }
 
     private fun blackAndWhite(bitmap: Bitmap): Bitmap {
         val balanced = grayWorldWhiteBalance(bitmap)
-        val out = Bitmap.createBitmap(balanced.width, balanced.height, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(balanced.width * balanced.height)
-        balanced.getPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
+        blackAndWhiteOpenCv(balanced)?.let { return sharpen(it, .6f) }
+        return blackAndWhiteFallback(balanced)
+    }
+
+    /**
+     * Local adaptive threshold (Gaussian) so uneven lighting and soft shadows no longer
+     * collapse into black blotches like a global threshold does. Block size follows the
+     * image resolution; ink keeps the original near-black tone of 24.
+     */
+    private fun blackAndWhiteOpenCv(bitmap: Bitmap): Bitmap? = withOpenCvMat(bitmap) { source ->
+        val gray = Mat()
+        val binary = Mat()
+        val remapped = Mat()
+        var alpha = Mat()
+        val channels = mutableListOf<Mat>()
+        val output = Mat()
+        try {
+            Imgproc.cvtColor(source, gray, Imgproc.COLOR_RGBA2GRAY)
+            val requested = (min(gray.cols(), gray.rows()) / 16).coerceIn(25, 101)
+            val blockSize = if (requested % 2 == 0) requested + 1 else requested
+            Imgproc.adaptiveThreshold(gray, binary, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, blockSize, 12.0)
+            // Map 0 -> 24 (ink) and 255 -> 255 (paper) to preserve the original tone.
+            binary.convertTo(remapped, CvType.CV_8UC1, 231.0 / 255.0, 24.0)
+            alpha = Mat(gray.size(), CvType.CV_8UC1, Scalar(255.0))
+            listOf(remapped, remapped, remapped, alpha).forEach(channels::add)
+            Core.merge(channels, output)
+            matToBitmap(output)
+        } finally {
+            channels.clear()
+            listOf(gray, binary, remapped, alpha, output).forEach(Mat::release)
+        }
+    }
+
+    private fun blackAndWhiteFallback(bitmap: Bitmap): Bitmap {
+        val out = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         var sum = 0L
         pixels.forEach { color ->
             sum += ((Color.red(color) * 0.299f) + (Color.green(color) * 0.587f) + (Color.blue(color) * 0.114f)).roundToInt()
@@ -4587,7 +4961,7 @@ object ImageProcessor {
             val value = if (lum > threshold) 255 else 24
             pixels[index] = Color.rgb(value, value, value)
         }
-        out.setPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
+        out.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         return sharpen(out, .6f)
     }
 

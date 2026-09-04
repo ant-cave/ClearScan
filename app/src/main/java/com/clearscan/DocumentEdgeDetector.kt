@@ -56,6 +56,9 @@ object DocumentEdgeDetector {
     private const val MIN_AREA_RATIO = 0.10
     private const val MIN_CONFIDENCE = 0.54f
 
+    /** Loads the bundled OpenCV runtime once; safe to call from any image-processing path. */
+    val openCvAvailable: Boolean get() = OpenCvRuntime.loaded
+
     fun detectPreview(bitmap: Bitmap, profile: PageDetectionProfile = PageDetectionProfile.Document): DocumentDetectionResult {
         val started = System.currentTimeMillis()
         if (bitmap.width < 64 || bitmap.height < 64 || !OpenCvRuntime.loaded) return failed(started, "Preview is unavailable")
