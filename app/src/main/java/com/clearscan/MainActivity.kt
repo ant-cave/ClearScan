@@ -529,7 +529,7 @@ data class UiState(
     val selectedToolIds: Set<Long> = emptySet(),
     val toolOption: String = "Medium",
     val cropPreset: String = "Original",
-    val selectedFilter: String = "Original",
+    val selectedFilter: String = "B&W",
     val translationState: TranslationState = TranslationState(),
     val savedResultDetail: Boolean = false,
     val legalTitle: String = "",
@@ -1123,13 +1123,13 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         replace(Screen.Camera) { copy(scanBitmap = null, processedBitmap = null, scanSourcePath = null) }
     }
 
-    fun applyFilter(filter: String) {
+    fun applyFilter(filter: String, params: FilterParams = FilterParams()) {
         val base = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val state = navFlow.value
         val stack = if (state.backStack.lastOrNull() == Screen.Edit) state.backStack.dropLast(1) else state.backStack
         navFlow.value = state.copy(busy = true, selectedFilter = filter)
         viewModelScope.launch {
-            val filtered = withContext(Dispatchers.Default) { ImageProcessor.filter(base, filter) }
+            val filtered = withContext(Dispatchers.Default) { ImageProcessor.filter(base, filter, params) }
             navFlow.value = navFlow.value.copy(screen = Screen.Edit, backStack = stack, processedBitmap = filtered, busy = false)
         }
     }
@@ -2943,28 +2943,35 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
     val source = state.processedBitmap ?: state.scanBitmap
     val mainSource = remember(source) { ImageProcessor.previewBitmap(source, 1440) }
     val thumbSource = remember(source) { ImageProcessor.previewBitmap(source, 320) }
-    val filters = remember { listOf("Original", "Auto", "Clean", "White Paper", "B&W", "Ink", "Magic Color", "Photo", "Gray", "Soft Gray", "High Contrast") }
+    // OpenCV-accelerated filters (ant-cave) are listed first and B&W is the default.
+    val filters = remember { listOf("B&W", "Ink", "White Paper", "Original", "Auto", "Clean", "Magic Color", "Photo", "High Contrast", "Gray", "Soft Gray") }
+    // Filters that expose user-tunable parameters below the strip.
+    val tunableFilters = remember { setOf("B&W", "Ink", "White Paper") }
     var selectedFilter by remember { mutableStateOf(state.selectedFilter) }
+    var filterParams by remember { mutableStateOf(FilterParams()) }
     var mainPreview by remember(mainSource) { mutableStateOf(mainSource) }
-    var mainCache by remember(mainSource) { mutableStateOf(mapOf("Original" to mainSource)) }
+    var mainCache by remember(mainSource) { mutableStateOf(mapOf(filterCacheKey("Original", FilterParams()) to mainSource)) }
     var thumbPreviews by remember(thumbSource) { mutableStateOf<Map<String, Bitmap?>>(emptyMap()) }
     LaunchedEffect(thumbSource) {
         thumbPreviews = withContext(Dispatchers.Default) {
             filters.associateWith { filter -> ImageProcessor.filter(thumbSource, filter) }
         }
     }
-    LaunchedEffect(mainSource, selectedFilter) {
-        mainCache[selectedFilter]?.let { mainPreview = it; return@LaunchedEffect }
-        val generated = withContext(Dispatchers.Default) { ImageProcessor.filter(mainSource, selectedFilter) }
+    LaunchedEffect(mainSource, selectedFilter, filterParams) {
+        val key = filterCacheKey(selectedFilter, filterParams)
+        mainCache[key]?.let { mainPreview = it; return@LaunchedEffect }
+        // Debounce slider drags before re-running the filter on the large preview.
+        delay(60)
+        val generated = withContext(Dispatchers.Default) { ImageProcessor.filter(mainSource, selectedFilter, filterParams) }
         mainPreview = generated
-        mainCache = (mainCache + (selectedFilter to generated)).entries.toList().takeLast(4).associate { it.key to it.value }
+        mainCache = (mainCache + (key to generated)).entries.toList().takeLast(4).associate { it.key to it.value }
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-        TopBar(tr(settings, "Filter", "滤镜"), onBack = model::back, action = tr(settings, "Apply", "应用"), onAction = { model.applyFilter(selectedFilter) })
+        TopBar(tr(settings, "Filter", "滤镜"), onBack = model::back, action = tr(settings, "Apply", "应用"), onAction = { model.applyFilter(selectedFilter, filterParams) })
         Box(Modifier.weight(1f).fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
             ScanBitmap(mainPreview ?: state.processedBitmap ?: state.scanBitmap, Modifier.fillMaxWidth().aspectRatio(.72f))
         }
-        LazyRow(Modifier.fillMaxWidth().padding(18.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        LazyRow(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             items(filters) { filter ->
                 val selected = filter == selectedFilter
                 val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
@@ -2975,6 +2982,44 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
         }
+        if (selectedFilter in tunableFilters) {
+            when (selectedFilter) {
+                "White Paper" -> FilterAdjustment(
+                    label = tr(settings, "Paper Lift", "纸张提亮"),
+                    valueText = "%.2f".format(filterParams.paperLift),
+                    value = filterParams.paperLift,
+                    range = .72f..1f,
+                ) { filterParams = filterParams.copy(paperLift = it) }
+                else -> {
+                    FilterAdjustment(
+                        label = tr(settings, "Threshold", "阈值"),
+                        valueText = filterParams.threshold.toInt().toString(),
+                        value = filterParams.threshold,
+                        range = 2f..30f,
+                    ) { filterParams = filterParams.copy(threshold = it) }
+                    FilterAdjustment(
+                        label = tr(settings, "Sharpen", "锐化"),
+                        valueText = "%.1fx".format(filterParams.sharpenScale),
+                        value = filterParams.sharpenScale,
+                        range = 0f..1.6f,
+                    ) { filterParams = filterParams.copy(sharpenScale = it) }
+                }
+            }
+            Spacer(Modifier.navigationBarsPadding())
+        }
+    }
+}
+
+/** Cache key that folds the current filter parameters into the preview cache entry. */
+private fun filterCacheKey(filter: String, params: FilterParams): String =
+    "$filter|${params.threshold}|${params.sharpenScale}|${params.paperLift}"
+
+@Composable
+private fun FilterAdjustment(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(96.dp), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+        Slider(value = value, onValueChange = onChange, valueRange = range, modifier = Modifier.weight(1f))
+        Text(valueText, Modifier.width(44.dp), fontSize = 12.sp, color = Muted, textAlign = TextAlign.End)
     }
 }
 
@@ -3936,6 +3981,16 @@ fun splitTranslationText(input: String, maxChars: Int = 800): List<String> {
     return chunks
 }
 
+/** User-tunable parameters for the OpenCV-accelerated filters. Defaults match the original look. */
+data class FilterParams(
+    /** Adaptive-threshold bias for B&W / Ink: lower picks up fainter strokes, higher keeps them thin and clean (2..30). */
+    val threshold: Float = 12f,
+    /** Multiplier applied to each filter's sharpen amount (0..1.6). */
+    val sharpenScale: Float = 1f,
+    /** White Paper lift gamma: lower lifts shadows more (0.72..1.0). */
+    val paperLift: Float = .88f,
+)
+
 object ImageProcessor {
     fun sampleDocumentBitmap(title: String = "AGREEMENT"): Bitmap {
         val bitmap = Bitmap.createBitmap(900, 1250, Bitmap.Config.ARGB_8888)
@@ -4429,37 +4484,37 @@ object ImageProcessor {
 
     private fun distance(a: Offset, b: Offset): Float = hypot(a.x - b.x, a.y - b.y)
 
-    fun filter(bitmap: Bitmap?, filter: String): Bitmap? {
+    fun filter(bitmap: Bitmap?, filter: String, params: FilterParams = FilterParams()): Bitmap? {
         if (bitmap == null) return null
         return when (filter) {
-            "B&W" -> blackAndWhite(bitmap)
-            "Ink" -> sharpen(blackAndWhite(bitmap), .35f)
+            "B&W" -> blackAndWhite(bitmap, params)
+            "Ink" -> sharpen(blackAndWhite(bitmap, params), .35f * params.sharpenScale)
             "Gray" -> adjust(grayWorldWhiteBalance(bitmap), 0f, 1.08f, 0f)
             "Soft Gray" -> adjust(grayWorldWhiteBalance(bitmap), .025f, .98f, 0f)
-            "Clean" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), .02f, 1.10f, .96f) ?: bitmap, .48f)
-            "White Paper" -> whitePaper(bitmap)
+            "Clean" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), .02f, 1.10f, .96f) ?: bitmap, .48f * params.sharpenScale)
+            "White Paper" -> whitePaper(bitmap, params)
             "Magic Color" -> adjust(grayWorldWhiteBalance(bitmap), .04f, 1.22f, 1.22f)
-            "Photo" -> sharpen(adjust(bitmap, 0f, 1.04f, 1.08f) ?: bitmap, .28f)
-            "High Contrast" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), 0f, 1.36f, .78f) ?: bitmap, .65f)
+            "Photo" -> sharpen(adjust(bitmap, 0f, 1.04f, 1.08f) ?: bitmap, .28f * params.sharpenScale)
+            "High Contrast" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), 0f, 1.36f, .78f) ?: bitmap, .65f * params.sharpenScale)
             "Auto" -> enhanceDocument(bitmap)
             else -> bitmap
         }
     }
 
-    private fun whitePaper(bitmap: Bitmap): Bitmap {
+    private fun whitePaper(bitmap: Bitmap, params: FilterParams): Bitmap {
         val balanced = grayWorldWhiteBalance(bitmap)
-        whitePaperOpenCv(balanced)?.let { return it }
-        return whitePaperFallback(balanced)
+        whitePaperOpenCv(balanced, params.paperLift)?.let { return it }
+        return whitePaperFallback(balanced, params.paperLift)
     }
 
-    /** Levels lift ((c-14)/224)^0.88 applied through a 256-entry native LUT. */
-    private fun whitePaperOpenCv(bitmap: Bitmap): Bitmap? = withOpenCvMat(bitmap) { source ->
+    /** Levels lift ((c-14)/224)^gamma applied through a 256-entry native LUT. */
+    private fun whitePaperOpenCv(bitmap: Bitmap, gamma: Float): Bitmap? = withOpenCvMat(bitmap) { source ->
         val table = MatOfByte()
         val output = Mat()
         try {
             val lut = ByteArray(256) { index ->
                 val normalized = ((index - 14f) / 224f).coerceIn(0f, 1f)
-                (255f * Math.pow(normalized.toDouble(), .88)).roundToInt().coerceIn(0, 255).toByte()
+                (255f * Math.pow(normalized.toDouble(), gamma.toDouble())).roundToInt().coerceIn(0, 255).toByte()
             }
             table.fromArray(*lut)
             Core.LUT(source, table, output)
@@ -4470,12 +4525,12 @@ object ImageProcessor {
         }
     }
 
-    private fun whitePaperFallback(bitmap: Bitmap): Bitmap {
+    private fun whitePaperFallback(bitmap: Bitmap, gamma: Float): Bitmap {
         val pixels = IntArray(bitmap.width * bitmap.height)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         fun lift(channel: Int): Int {
             val normalized = ((channel - 14f) / 224f).coerceIn(0f, 1f)
-            return (255f * Math.pow(normalized.toDouble(), .88)).roundToInt().coerceIn(0, 255)
+            return (255f * Math.pow(normalized.toDouble(), gamma.toDouble())).roundToInt().coerceIn(0, 255)
         }
         pixels.indices.forEach { index ->
             val color = pixels[index]
@@ -4486,18 +4541,20 @@ object ImageProcessor {
         }
     }
 
-    private fun blackAndWhite(bitmap: Bitmap): Bitmap {
+    private fun blackAndWhite(bitmap: Bitmap, params: FilterParams): Bitmap {
         val balanced = grayWorldWhiteBalance(bitmap)
-        blackAndWhiteOpenCv(balanced)?.let { return sharpen(it, .6f) }
-        return blackAndWhiteFallback(balanced)
+        blackAndWhiteOpenCv(balanced, params.threshold)?.let { return sharpen(it, .6f * params.sharpenScale) }
+        return blackAndWhiteFallback(balanced, params)
     }
 
     /**
      * Local adaptive threshold (Gaussian) so uneven lighting and soft shadows no longer
      * collapse into black blotches like a global threshold does. Block size follows the
-     * image resolution; ink keeps the original near-black tone of 24.
+     * image resolution; ink keeps the original near-black tone of 24. The bias controls
+     * stroke weight: a higher value keeps strokes thinner and cleaner, a lower value
+     * picks up fainter strokes (at the cost of noise).
      */
-    private fun blackAndWhiteOpenCv(bitmap: Bitmap): Bitmap? = withOpenCvMat(bitmap) { source ->
+    private fun blackAndWhiteOpenCv(bitmap: Bitmap, bias: Float): Bitmap? = withOpenCvMat(bitmap) { source ->
         val gray = Mat()
         val binary = Mat()
         val remapped = Mat()
@@ -4508,7 +4565,7 @@ object ImageProcessor {
             Imgproc.cvtColor(source, gray, Imgproc.COLOR_RGBA2GRAY)
             val requested = (min(gray.cols(), gray.rows()) / 16).coerceIn(25, 101)
             val blockSize = if (requested % 2 == 0) requested + 1 else requested
-            Imgproc.adaptiveThreshold(gray, binary, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, blockSize, 12.0)
+            Imgproc.adaptiveThreshold(gray, binary, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, blockSize, bias.toDouble())
             // Map 0 -> 24 (ink) and 255 -> 255 (paper) to preserve the original tone.
             binary.convertTo(remapped, CvType.CV_8UC1, 231.0 / 255.0, 24.0)
             alpha = Mat(gray.size(), CvType.CV_8UC1, Scalar(255.0))
@@ -4521,7 +4578,7 @@ object ImageProcessor {
         }
     }
 
-    private fun blackAndWhiteFallback(bitmap: Bitmap): Bitmap {
+    private fun blackAndWhiteFallback(bitmap: Bitmap, params: FilterParams): Bitmap {
         val out = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(bitmap.width * bitmap.height)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
@@ -4529,7 +4586,9 @@ object ImageProcessor {
         pixels.forEach { color ->
             sum += ((Color.red(color) * 0.299f) + (Color.green(color) * 0.587f) + (Color.blue(color) * 0.114f)).roundToInt()
         }
-        val threshold = ((sum / pixels.size).toInt() - 8).coerceIn(96, 190)
+        // Global-threshold stand-in for the adaptive bias: the default 12 maps to the original -8 offset.
+        val biasOffset = 4 - params.threshold.toInt()
+        val threshold = ((sum / pixels.size).toInt() + biasOffset).coerceIn(96, 190)
         pixels.indices.forEach { index ->
             val color = pixels[index]
             val lum = ((Color.red(color) * 0.299f) + (Color.green(color) * 0.587f) + (Color.blue(color) * 0.114f)).roundToInt()
@@ -4537,7 +4596,7 @@ object ImageProcessor {
             pixels[index] = Color.rgb(value, value, value)
         }
         out.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        return sharpen(out, .6f)
+        return sharpen(out, .6f * params.sharpenScale)
     }
 
     fun adjust(bitmap: Bitmap?, brightness: Float, contrast: Float, saturation: Float): Bitmap? {
