@@ -93,31 +93,9 @@ class ClearScanUnitTest {
     }
 
     @Test
-    fun hyMtPrompt_keepsChineseToEnglishDirection() {
-        val prompt = buildHyMt2Prompt("你好，世界", "Chinese", "English")
-        assertTrue(prompt.contains("翻译为英语"))
-        assertFalse(prompt.contains("翻译为中文"))
-        assertTrue(prompt.endsWith("你好，世界"))
-    }
-
-    @Test
-    fun hyMtPrompt_autoDetectsChineseSource() {
+    fun translationLanguageDetection_distinguishesScripts() {
         assertEquals("Chinese", detectTranslationLanguage("扫描这份文档"))
         assertEquals("English", detectTranslationLanguage("Scan this document"))
-        assertTrue(buildHyMt2Prompt("Hello", "Auto", "Chinese").contains("翻译为中文"))
-    }
-
-    @Test
-    fun hyMtModelValidation_rejectsLegacyAndTruncatedFiles() {
-        assertTrue(isExpectedHyMt2Model(1_133_080_448L, "GGUF"))
-        assertFalse(isExpectedHyMt2Model(440_000_000L, "GGUF"))
-        assertFalse(isExpectedHyMt2Model(1_133_080_448L, "<htm"))
-    }
-
-    @Test
-    fun hyMtPrompt_supportsAdditionalTargetLanguages() {
-        assertTrue(buildHyMt2Prompt("你好", "Chinese", "Arabic").contains("翻译为阿拉伯语"))
-        assertTrue(buildHyMt2Prompt("Hello", "English", "Vietnamese").contains("into Vietnamese"))
     }
 
     @Test

@@ -1,3 +1,13 @@
+/*
+ * ClearScan app module
+ * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Based on ClearScan by SuiYueMengHen (MIT License).
+ * ant-cave modifications: OpenCV-accelerated filters, cloud translation API,
+ * local llama.cpp inference removed.
+ */
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -68,7 +78,6 @@ android {
 }
 
 dependencies {
-    implementation(project(":llamaAndroid"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

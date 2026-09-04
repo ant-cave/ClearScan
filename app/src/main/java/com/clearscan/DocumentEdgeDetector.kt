@@ -1,3 +1,12 @@
+/*
+ * ClearScan document edge detection
+ * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Based on ClearScan by SuiYueMengHen (MIT License).
+ * ant-cave modifications: expose OpenCV loader state for filter fallback logic.
+ */
+
 package com.clearscan
 
 import android.graphics.Bitmap

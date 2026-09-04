@@ -1,3 +1,7 @@
+# ClearScan branch CI workflow
+# Copyright (c) 2026 ant-cave <antmmmmm@126.com>
+# SPDX-License-Identifier: MIT
+
 name: Branch Debug Build
 
 on:
@@ -20,8 +24,6 @@ jobs:
           java-version: "17"
           cache: gradle
       - uses: android-actions/setup-android@v3
-      - name: Install NDK and CMake
-        run: sdkmanager "ndk;28.2.13676358" "cmake;3.31.6"
       - name: Unit tests
         run: ./gradlew testDownloadModelDebugUnitTest
       - name: Build debug APK

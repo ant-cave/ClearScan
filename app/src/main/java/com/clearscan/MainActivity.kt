@@ -1,3 +1,15 @@
+/*
+ * ClearScan main activity and view model
+ * Modifications Copyright (c) 2026 ant-cave <antmmmmm@126.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Based on ClearScan by SuiYueMengHen (MIT License).
+ * ant-cave modifications:
+ *  - OpenCV-accelerated document filters (adaptive threshold, unsharp mask, white balance)
+ *  - Cloud translation via OpenAI-compatible chat APIs (DeepSeek, Kimi, Qwen, ...)
+ *  - Local llama.cpp / Hy-MT2 inference removed in favor of the cloud engine
+ */
+
 package com.clearscan
 
 import android.Manifest
@@ -241,8 +253,6 @@ import java.util.concurrent.Executors
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.android.gms.tasks.Tasks
-import com.arm.aichat.AiChat
-import com.arm.aichat.InferenceEngine
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.hypot
@@ -255,13 +265,6 @@ private val TealDark = ComposeColor(0xFF07847F)
 private val TextDark = ComposeColor(0xFF111827)
 private val Muted = ComposeColor(0xFF737B8C)
 private val Soft = ComposeColor(0xFFF4F6F8)
-private const val HY_MT_MODEL_NAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
-private const val HY_MT_MODEL_BYTES = 1_133_080_448L
-
-@VisibleForTesting
-fun isExpectedHyMt2Model(sizeBytes: Long, magic: String): Boolean {
-    return sizeBytes == HY_MT_MODEL_BYTES && magic == "GGUF"
-}
 
 object AppLogger {
     private const val MAX_LOG_BYTES = 512 * 1024
@@ -468,27 +471,7 @@ enum class DocumentCaptureMode { Single, Multi }
 fun shouldOpenCropAfterCapture(scanMode: ScanMode, captureMode: DocumentCaptureMode): Boolean =
     scanMode == ScanMode.Document && captureMode == DocumentCaptureMode.Single
 
-data class ModelSource(
-    val id: String,
-    val label: String,
-    val url: String,
-    val mirrorType: String,
-)
-
-data class ModelDownloadState(
-    val status: String = "missing",
-    val sourceId: String = "modelscope",
-    val downloadedBytes: Long = 0L,
-    val totalBytes: Long = 0L,
-    val speedBytesPerSec: Long = 0L,
-    val etaSeconds: Long = 0L,
-    val progress: Float = 0f,
-    val error: String? = null,
-)
-
 data class TranslationState(
-    val modelStatus: String = "missing",
-    val selectedSource: String = "modelscope",
     val sourceLang: String = "Auto",
     val targetLang: String = "Chinese",
     val inputText: String = "",
@@ -496,9 +479,6 @@ data class TranslationState(
     val isTranslating: Boolean = false,
     val progress: Float = 0f,
     val error: String? = null,
-    val download: ModelDownloadState = ModelDownloadState(),
-    /** "local" = bundled Hy-MT2 runtime, "cloud" = OpenAI-compatible chat API. */
-    val engine: String = "cloud",
     val cloudBaseUrl: String = "https://api.deepseek.com",
     val cloudModel: String = "deepseek-chat",
     val cloudApiKey: String = "",
@@ -556,36 +536,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     private val queryFlow = MutableStateFlow("")
     private val navFlow = MutableStateFlow(UiState())
     private var allDocuments: List<Document> = emptyList()
-    private var downloadCancelRequested = false
-    private var translationEngine: InferenceEngine? = null
     private var detectionRequestId = 0L
-
-    private val modelSources = listOf(
-            ModelSource(
-                id = "modelscope",
-                label = "国内镜像源 / ModelScope",
-                url = "https://modelscope.cn/models/Tencent-Hunyuan/Hy-MT2-1.8B-GGUF/resolve/master/Hy-MT2-1.8B-Q4_K_M.gguf",
-                mirrorType = "mirror",
-            ),
-            ModelSource(
-                id = "hfmirror",
-                label = "国内镜像源 / HF Mirror",
-                url = "https://hf-mirror.com/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf",
-                mirrorType = "mirror",
-            ),
-            ModelSource(
-                id = "huggingface",
-                label = "官方源 / Hugging Face",
-                url = "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/main/Hy-MT2-1.8B-Q4_K_M.gguf",
-                mirrorType = "official",
-            ),
-            ModelSource(
-                id = "local",
-                label = "本地模型文件",
-                url = "",
-                mirrorType = "local",
-            ),
-    )
 
     val ui: StateFlow<UiState> = combine(dao.observeDocuments(), dao.observeFolders(), settingsFlow, queryFlow, navFlow) { docs, folders, settings, query, nav ->
         allDocuments = docs
@@ -1427,15 +1378,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         go(Screen.Translate)
     }
 
-    fun modelSources(): List<ModelSource> = modelSources
-
-    fun selectModelSource(sourceId: String) {
-        AppLogger.i("Translate", "Select model source $sourceId")
-        val state = navFlow.value.translationState
-        prefs.edit().putString("translationSource", sourceId).apply()
-        navFlow.value = navFlow.value.copy(translationState = state.copy(selectedSource = sourceId, download = state.download.copy(sourceId = sourceId)))
-    }
-
     fun setTranslationInput(text: String) {
         val state = navFlow.value.translationState
         navFlow.value = navFlow.value.copy(translationState = state.copy(inputText = text, error = null))
@@ -1465,139 +1407,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         navFlow.value = navFlow.value.copy(translationState = state.copy(inputText = "", outputText = "", error = null))
     }
 
-    fun cancelModelDownload() {
-        AppLogger.i("Translate", "Cancel model download")
-        downloadCancelRequested = true
-        val state = navFlow.value.translationState
-        navFlow.value = navFlow.value.copy(
-            translationState = state.copy(
-                download = state.download.copy(status = "paused", error = "Download paused. Tap Download Model to resume."),
-                modelStatus = if (isValidHyMt2Model(translationModelFile())) "ready" else "missing",
-            )
-        )
-    }
-
-    fun startModelDownload() {
-        val source = modelSources.firstOrNull { it.id == navFlow.value.translationState.selectedSource } ?: modelSources.first()
-        AppLogger.i("Translate", "Start model install/download source=${source.id}")
-        if (source.id == "local") {
-            refreshTranslationModelState()
-            val valid = isValidHyMt2Model(translationModelFile())
-            val state = navFlow.value.translationState
-            navFlow.value = navFlow.value.copy(
-                translationState = state.copy(
-                    error = if (valid) null else "Place $HY_MT_MODEL_NAME (${formatSize(HY_MT_MODEL_BYTES)}) in ${translationModelFile().parentFile?.absolutePath}",
-                    modelStatus = if (valid) "ready" else "missing",
-                )
-            )
-            return
-        }
-        viewModelScope.launch {
-            downloadCancelRequested = false
-            val target = translationModelFile()
-            val temp = File(target.parentFile, "${target.name}.download")
-            target.parentFile?.mkdirs()
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val existingBytes = temp.takeIf { it.exists() }?.length()?.coerceAtLeast(0L) ?: 0L
-                    val connection = (URL(source.url).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 15_000
-                        readTimeout = 30_000
-                        if (existingBytes > 0L) setRequestProperty("Range", "bytes=$existingBytes-")
-                    }
-                    val responseCode = connection.responseCode
-                    check(responseCode in 200..299) { "Model server returned HTTP $responseCode" }
-                    val supportsResume = existingBytes > 0L && responseCode == HttpURLConnection.HTTP_PARTIAL
-                    val resumeBytes = if (supportsResume) existingBytes else 0L
-                    if (!supportsResume && temp.exists()) temp.delete()
-                    val contentLength = connection.contentLengthLong
-                    val total = if (contentLength > 0L) resumeBytes + contentLength else 0L
-                    if (total > 0L) {
-                        check(total == HY_MT_MODEL_BYTES) {
-                            "Unexpected model size ${formatSize(total)}; expected ${formatSize(HY_MT_MODEL_BYTES)}. Choose another source."
-                        }
-                    }
-                    var downloaded = resumeBytes
-                    var windowBytes = 0L
-                    var lastUiUpdate = System.currentTimeMillis()
-                    var lastSpeedUpdate = lastUiUpdate
-                    connection.inputStream.use { input ->
-                        FileOutputStream(temp, supportsResume).use { output ->
-                            val buffer = ByteArray(1024 * 512)
-                            navFlow.value = navFlow.value.copy(
-                                translationState = navFlow.value.translationState.copy(
-                                    modelStatus = "downloading",
-                                    download = ModelDownloadState("downloading", source.id, downloaded, total, 0L, 0L, if (total > 0L) downloaded.toFloat() / total.toFloat() else 0f, null),
-                                )
-                            )
-                            while (true) {
-                                if (downloadCancelRequested) error("Download paused")
-                                val read = input.read(buffer)
-                                if (read <= 0) break
-                                output.write(buffer, 0, read)
-                                downloaded += read
-                                windowBytes += read
-                                val now = System.currentTimeMillis()
-                                if (now - lastUiUpdate >= 250L || (total > 0L && downloaded >= total)) {
-                                    val speedWindowMs = max(1L, now - lastSpeedUpdate)
-                                    val speed = windowBytes * 1000L / speedWindowMs
-                                    val eta = if (total > 0L && speed > 0L) (total - downloaded).coerceAtLeast(0L) / speed else 0L
-                                    val progress = if (total > 0L) downloaded.toFloat() / total.toFloat() else 0f
-                                    navFlow.value = navFlow.value.copy(
-                                        translationState = navFlow.value.translationState.copy(
-                                            modelStatus = "downloading",
-                                            download = ModelDownloadState("downloading", source.id, downloaded, total, speed, eta, progress, null),
-                                        )
-                                    )
-                                    lastUiUpdate = now
-                                    lastSpeedUpdate = now
-                                    windowBytes = 0L
-                                }
-                            }
-                            output.flush()
-                        }
-                    }
-                    check(isValidHyMt2Model(temp)) {
-                        "Downloaded model is invalid: ${formatSize(temp.length())}, expected ${formatSize(HY_MT_MODEL_BYTES)} GGUF Q4_K_M. Please retry with another source."
-                    }
-                    if (target.exists()) target.delete()
-                    check(temp.renameTo(target)) { "Unable to finalize model file." }
-                    translationEngine?.let { engine ->
-                        if (engine.state.value is InferenceEngine.State.ModelReady || engine.state.value is InferenceEngine.State.Error) {
-                            engine.cleanUp()
-                        }
-                    }
-                    prefs.edit()
-                        .putString("translationSource", source.id)
-                        .putLong("translationModelSize", target.length())
-                        .putBoolean("translationModelReady", true)
-                        .apply()
-                    AppLogger.i("Translate", "Validated model download complete source=${source.id} bytes=${target.length()} path=${target.absolutePath}")
-                    navFlow.value = navFlow.value.copy(
-                        translationState = navFlow.value.translationState.copy(
-                            modelStatus = "ready",
-                            selectedSource = source.id,
-                            download = ModelDownloadState("ready", source.id, target.length(), target.length(), 0L, 0L, 1f, null),
-                            error = null,
-                        )
-                    )
-                }.onFailure { error ->
-                    if (error.message != "Download paused") temp.delete()
-                    navFlow.value = navFlow.value.copy(
-                        translationState = navFlow.value.translationState.copy(
-                            modelStatus = if (isValidHyMt2Model(target)) "ready" else "missing",
-                            download = navFlow.value.translationState.download.copy(
-                                status = if (error.message == "Download paused") "paused" else "error",
-                                error = error.message ?: "Download failed",
-                            ),
-                            error = error.message ?: "Download failed",
-                        )
-                    )
-                }
-            }
-        }
-    }
-
     fun translateText() {
         val state = navFlow.value.translationState
         val chinese = settingsFlow.value.language == "中文"
@@ -1606,30 +1415,16 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             navFlow.value = navFlow.value.copy(translationState = state.copy(error = if (chinese) "请输入要翻译的文本。" else "Enter text to translate."))
             return
         }
-        if (state.engine == "cloud") {
-            if (state.cloudApiKey.isBlank() || state.cloudBaseUrl.isBlank() || state.cloudModel.isBlank()) {
-                navFlow.value = navFlow.value.copy(
-                    translationState = state.copy(
-                        error = if (chinese) "请先填写云端 API 的地址、密钥和模型名称。" else "Fill in the cloud API base URL, key and model first.",
-                    )
+        if (state.cloudApiKey.isBlank() || state.cloudBaseUrl.isBlank() || state.cloudModel.isBlank()) {
+            navFlow.value = navFlow.value.copy(
+                translationState = state.copy(
+                    error = if (chinese) "请先填写云端 API 的地址、密钥和模型名称。" else "Fill in the cloud API base URL, key and model first.",
                 )
-                return
-            }
-        } else {
-            val modelFile = translationModelFile()
-            if (!isValidHyMt2Model(modelFile)) {
-                AppLogger.w("Translate", "Translate requested but model invalid: ${modelFile.absolutePath}, bytes=${modelFile.takeIf { it.exists() }?.length() ?: 0L}")
-                navFlow.value = navFlow.value.copy(
-                    translationState = state.copy(
-                        modelStatus = "missing",
-                        error = if (chinese) "模型文件缺失或不完整，请重新下载 Q4_K_M 模型。" else "The Q4_K_M model is missing or incomplete. Download it again.",
-                    )
-                )
-                return
-            }
+            )
+            return
         }
         viewModelScope.launch {
-            AppLogger.i("Translate", "Translate start engine=${state.engine} source=${state.sourceLang} target=${state.targetLang} chars=${state.inputText.length}")
+            AppLogger.i("Translate", "Translate start source=${state.sourceLang} target=${state.targetLang} chars=${state.inputText.length}")
             navFlow.value = navFlow.value.copy(
                 translationState = state.copy(
                     isTranslating = true,
@@ -1639,11 +1434,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             )
             val translated = runCatching {
-                if (state.engine == "cloud") {
-                    translateWithCloudApi(state.inputText, state.sourceLang, state.targetLang, state.cloudBaseUrl.trim(), state.cloudApiKey.trim(), state.cloudModel.trim())
-                } else {
-                    translateWithHyMt2(state.inputText, state.sourceLang, state.targetLang)
-                }
+                translateWithCloudApi(state.inputText, state.sourceLang, state.targetLang, state.cloudBaseUrl.trim(), state.cloudApiKey.trim(), state.cloudModel.trim())
             }.onFailure { AppLogger.e("Translate", "Translation failed", it) }.getOrElse { error ->
                 navFlow.value = navFlow.value.copy(
                     translationState = navFlow.value.translationState.copy(
@@ -1664,75 +1455,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             )
             AppLogger.i("Translate", "Translate complete outputChars=${translated.length}")
         }
-    }
-
-    private suspend fun translateWithHyMt2(input: String, sourceLang: String, targetLang: String): String {
-        require(sourceLang != targetLang || sourceLang == "Auto") { "Source and target languages must be different." }
-        val engine = translationEngine ?: AiChat.getInferenceEngine(getApplication()).also { translationEngine = it }
-        var engineState = engine.state.value
-        if (engineState is InferenceEngine.State.Uninitialized || engineState is InferenceEngine.State.Initializing) {
-            engineState = engine.state.first {
-                it is InferenceEngine.State.Initialized || it is InferenceEngine.State.ModelReady || it is InferenceEngine.State.Error
-            }
-        }
-        if (engineState is InferenceEngine.State.Error) {
-            engine.cleanUp()
-            engineState = engine.state.value
-        }
-        val diagnostics = runCatching { engine.diagnostics() }.getOrElse { "unavailable: ${it.message}" }
-        AppLogger.i("TranslateNative", diagnostics.take(2_000))
-        if (engineState is InferenceEngine.State.Initialized) {
-            navFlow.value = navFlow.value.copy(
-                translationState = navFlow.value.translationState.copy(progress = .35f)
-            )
-            val modelFile = translationModelFile()
-            AppLogger.i("Translate", "Loading GGUF model bytes=${modelFile.length()} path=${modelFile.absolutePath}")
-            engine.loadModel(modelFile.absolutePath)
-        }
-        check(engine.state.value is InferenceEngine.State.ModelReady) { "Hy-MT2 model could not be loaded." }
-        navFlow.value = navFlow.value.copy(
-            translationState = navFlow.value.translationState.copy(progress = .55f)
-        )
-        val chunks = splitTranslationText(input)
-        check(chunks.isNotEmpty()) { "Text is empty." }
-        val completed = StringBuilder()
-        var lastUiUpdate = 0L
-        chunks.forEachIndexed { index, chunk ->
-            engine.resetConversation()
-            val chunkOutput = StringBuilder()
-            val prompt = buildHyMt2Prompt(chunk, sourceLang, targetLang)
-            val predictLength = (chunk.length * 2).coerceIn(128, 900)
-            engine.sendUserPrompt(prompt, predictLength).collect { token ->
-                chunkOutput.append(token)
-                val now = System.currentTimeMillis()
-                if (now - lastUiUpdate >= 80L) {
-                    val preview = buildString {
-                        append(completed)
-                        if (isNotEmpty() && chunkOutput.isNotEmpty()) append('\n')
-                        append(chunkOutput.toString().trimStart())
-                    }
-                    navFlow.value = navFlow.value.copy(
-                        translationState = navFlow.value.translationState.copy(
-                            progress = .55f + .4f * (index.toFloat() / chunks.size.toFloat()),
-                            outputText = preview,
-                        )
-                    )
-                    lastUiUpdate = now
-                }
-            }
-            if (completed.isNotEmpty()) completed.append('\n')
-            completed.append(chunkOutput.toString().trim().removeSurrounding("\""))
-        }
-        return completed.toString().trim()
-    }
-
-    fun setTranslationEngine(engine: String) {
-        val next = if (engine == "cloud") "cloud" else "local"
-        prefs.edit().putString("translationEngine", next).apply()
-        navFlow.value = navFlow.value.copy(
-            translationState = navFlow.value.translationState.copy(engine = next, error = null)
-        )
-        AppLogger.i("Translate", "Engine switched to $next")
     }
 
     fun updateTranslationCloudConfig(baseUrl: String, apiKey: String, model: String) {
@@ -1840,42 +1562,13 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun refreshTranslationModelState() {
-        val file = translationModelFile()
-        val legacyFile = File(file.parentFile, "hy-mt2-1.8b-1.25bit.gguf")
-        if (legacyFile.exists()) {
-            AppLogger.w("Translate", "Removing legacy incompatible model bytes=${legacyFile.length()}")
-            legacyFile.delete()
-        }
-        val storedSource = prefs.getString("translationSource", "modelscope") ?: "modelscope"
-        val sourceId = storedSource.takeIf { id -> modelSources.any { it.id == id } } ?: "modelscope"
-        val ready = isValidHyMt2Model(file)
-        AppLogger.i("Translate", "Model validation ready=$ready path=${file.absolutePath} bytes=${file.takeIf { it.exists() }?.length() ?: 0L}")
         navFlow.value = navFlow.value.copy(
             translationState = navFlow.value.translationState.copy(
-                modelStatus = if (ready) "ready" else "missing",
-                selectedSource = sourceId,
-                engine = prefs.getString("translationEngine", "cloud") ?: "cloud",
                 cloudBaseUrl = prefs.getString("translationCloudBaseUrl", "https://api.deepseek.com") ?: "https://api.deepseek.com",
                 cloudModel = prefs.getString("translationCloudModel", "deepseek-chat") ?: "deepseek-chat",
                 cloudApiKey = prefs.getString("translationCloudApiKey", "") ?: "",
-                download = ModelDownloadState(if (ready) "ready" else "missing", sourceId, if (ready) file.length() else 0L, if (ready) file.length() else 0L, progress = if (ready) 1f else 0f),
-                error = if (ready) null else navFlow.value.translationState.error,
             )
         )
-    }
-
-    private fun translationModelFile(): File {
-        return File(getApplication<Application>().filesDir, "models/hy-mt2/$HY_MT_MODEL_NAME")
-    }
-
-    private fun isValidHyMt2Model(file: File): Boolean {
-        if (!file.isFile) return false
-        return runCatching {
-            file.inputStream().buffered().use { input ->
-                val magic = ByteArray(4)
-                input.read(magic) == magic.size && isExpectedHyMt2Model(file.length(), magic.decodeToString())
-            }
-        }.getOrDefault(false)
     }
 
     fun beginTool(name: String) {
@@ -3669,7 +3362,7 @@ fun ToolsScreen(state: UiState, model: ClearScanViewModel) {
                     ToolCard("PDF Edit", tr(settings, "PDF Edit", "PDF 编辑"), tr(settings, "Edit pages in\nPDF files", "编辑 PDF\n页面"), Icons.Default.Edit, Modifier.weight(1f), model)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    ToolCard("Translate", tr(settings, "Translate", "翻译"), tr(settings, "Local Hy-MT2\nmulti-language MT", "本地 Hy-MT2\n多语言翻译"), Icons.Default.Language, Modifier.weight(1f), model)
+                    ToolCard("Translate", tr(settings, "Translate", "翻译"), tr(settings, "Cloud AI\nmulti-language MT", "云端 AI\n多语言翻译"), Icons.Default.Language, Modifier.weight(1f), model)
                     ToolCard("Image Format Converter", tr(settings, "Image Format\nConverter", "图片格式\n转换"), tr(settings, "JPEG, PNG, WebP,\nBMP and PDF", "支持 JPEG、PNG、\nWebP、BMP、PDF"), Icons.Default.PhotoLibrary, Modifier.weight(1f), model)
                 }
             }
@@ -3708,13 +3401,11 @@ fun ToolCard(toolName: String, title: String, subtitle: String, icon: ImageVecto
 fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
     val translation = state.translationState
-    val sources = remember { model.modelSources() }
     val languages = listOf(
         "Auto", "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish",
         "Portuguese", "Italian", "Russian", "Arabic", "Thai", "Vietnamese", "Indonesian",
         "Malay", "Turkish", "Polish", "Dutch", "Czech", "Ukrainian", "Hindi",
     )
-    val sourceTrack = if (settings.theme == "Dark") ComposeColor(0xFF20262D) else Soft
     LazyColumn(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(),
         contentPadding = PaddingValues(22.dp),
@@ -3724,40 +3415,7 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(tr(settings, "Translation Engine", "翻译引擎"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                    val engines = listOf(
-                        "cloud" to (tr(settings, "Cloud API (OpenAI-compatible)", "云端 API（OpenAI 兼容）") to tr(settings, "DeepSeek / OpenAI / Kimi / Qwen / OpenRouter / Ollama…", "DeepSeek / OpenAI / Kimi / 通义 / OpenRouter / Ollama…")),
-                        "local" to (tr(settings, "Local Hy-MT2 model", "本地 Hy-MT2 模型") to tr(settings, "Runs on-device; runtime not bundled in this build.", "设备端运行；此构建未打包运行时。")),
-                    )
-                    engines.forEach { (id, labels) ->
-                        val (title, subtitle) = labels
-                        val selected = translation.engine == id
-                        val rowBg = if (selected) Teal.copy(alpha = if (settings.theme == "Dark") .18f else .12f) else sourceTrack.copy(alpha = if (settings.theme == "Dark") .5f else .45f)
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(rowBg)
-                                .border(1.dp, if (selected) Teal.copy(alpha = .35f) else ComposeColor.Transparent, RoundedCornerShape(10.dp))
-                                .clickable { model.setTranslationEngine(id) }
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(title, color = MaterialTheme.colorScheme.onSurface, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-                                Text(subtitle, color = Muted, fontSize = 12.sp)
-                            }
-                            if (selected) Icon(Icons.Default.Check, null, tint = Teal)
-                        }
-                    }
-                }
-            }
-        }
-        if (translation.engine == "cloud") {
-            item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(tr(settings, "Cloud API Settings", "云端 API 设置"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(tr(settings, "Cloud API Settings", "云端 API 设置"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                         OutlinedTextField(
                             value = translation.cloudBaseUrl,
                             onValueChange = { model.updateTranslationCloudConfig(it, translation.cloudApiKey, translation.cloudModel) },
@@ -3797,51 +3455,6 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
                     }
                 }
             }
-        } else {
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(0.dp)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(tr(settings, "Hy-MT2 Model", "Hy-MT2 模型"), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                    Text(
-                        when (translation.modelStatus) {
-                            "ready" -> tr(settings, "Model is ready for local use.", "模型已就绪，可本地使用。")
-                            "downloading" -> tr(settings, "Downloading model. Keep this page open.", "正在下载模型，请保持页面打开。")
-                            else -> tr(settings, "Choose a source, then install or download the model.", "选择来源后安装或下载模型。")
-                        },
-                        color = Muted,
-                        fontSize = 13.sp,
-                    )
-                    sources.forEach { source ->
-                        val selected = translation.selectedSource == source.id
-                        val selectedAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(220), label = "model-source-bg")
-                        val rowBg = if (selected) Teal.copy(alpha = if (settings.theme == "Dark") .18f else .12f * selectedAlpha) else sourceTrack.copy(alpha = if (settings.theme == "Dark") .5f else .45f)
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(rowBg)
-                                .border(1.dp, if (selected) Teal.copy(alpha = .35f) else ComposeColor.Transparent, RoundedCornerShape(10.dp))
-                                .clickable { model.selectModelSource(source.id) }
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(source.label, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-                            if (selected) Icon(Icons.Default.Check, null, tint = Teal)
-                        }
-                    }
-                    ModelDownloadProgress(translation.download, settings)
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(onClick = model::startModelDownload, enabled = translation.download.status != "downloading", colors = ButtonDefaults.buttonColors(containerColor = Teal)) {
-                            Text(if (translation.modelStatus == "ready") tr(settings, "Verify / Redownload", "验证/重新下载") else tr(settings, "Download Model", "下载模型"))
-                        }
-                        OutlinedButton(onClick = model::cancelModelDownload, enabled = translation.download.status == "downloading") {
-                            Text(tr(settings, "Cancel", "取消"))
-                        }
-                    }
-                }
-            }
-        }
-        }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SelectField(tr(settings, "From", "源语言"), translation.sourceLang, languages, Modifier.weight(1f), displayValue = { translationLanguageLabel(it, settings) }) { model.setTranslationLanguages(source = it) }
@@ -3876,11 +3489,7 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
                     Text(tr(settings, "Result", "结果"), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         when {
-                            translation.isTranslating -> if (translation.engine == "cloud") {
-                                tr(settings, "Translating via cloud API...", "正在通过云端 API 翻译...")
-                            } else {
-                                tr(settings, "Translating locally...", "正在本地翻译...")
-                            }
+                            translation.isTranslating -> tr(settings, "Translating via cloud API...", "正在通过云端 API 翻译...")
                             translation.outputText.isNotBlank() -> translation.outputText
                             translation.error != null -> translation.error
                             else -> tr(settings, "Translation output will appear here.", "翻译结果会显示在这里。")
@@ -3891,52 +3500,6 @@ fun TranslateScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
         }
-    }
-}
-
-@Composable
-fun ModelDownloadProgress(download: ModelDownloadState, settings: AppSettings) {
-    val percent = (download.progress * 100).roundToInt().coerceIn(0, 100)
-    val animatedProgress by animateFloatAsState(download.progress.coerceIn(0f, 1f), animationSpec = tween(260), label = "model-progress")
-    val infinite = rememberInfiniteTransition(label = "model-download")
-    val indeterminateOffset by infinite.animateFloat(
-        initialValue = -0.35f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(animation = tween(950, easing = LinearEasing), repeatMode = RepeatMode.Restart),
-        label = "model-indeterminate",
-    )
-    val isUnknownTotal = download.status == "downloading" && download.totalBytes <= 0L
-    val trackColor = if (settings.theme == "Dark") ComposeColor(0xFF2A313A) else Soft
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(8.dp)).background(trackColor)) {
-            if (isUnknownTotal) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(.36f)
-                        .fillMaxHeight()
-                        .offset(x = (indeterminateOffset * 260).dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Teal)
-                )
-            } else {
-                Box(Modifier.fillMaxWidth(animatedProgress).fillMaxHeight().background(Teal))
-            }
-        }
-        Text(
-            when (download.status) {
-                "downloading" -> if (download.totalBytes > 0L) {
-                    tr(settings, "$percent% • ${formatSize(download.downloadedBytes)} / ${formatSize(download.totalBytes)} • ${formatSize(download.speedBytesPerSec)}/s • ETA ${download.etaSeconds}s", "$percent% • ${formatSize(download.downloadedBytes)} / ${formatSize(download.totalBytes)} • ${formatSize(download.speedBytesPerSec)}/秒 • 剩余 ${download.etaSeconds} 秒")
-                } else {
-                    tr(settings, "Downloading • ${formatSize(download.downloadedBytes)} • ${formatSize(download.speedBytesPerSec)}/s", "下载中 • 已下载 ${formatSize(download.downloadedBytes)} • ${formatSize(download.speedBytesPerSec)}/秒")
-                }
-                "ready" -> tr(settings, "Model ready • ${formatSize(download.totalBytes)}", "模型已就绪 • ${formatSize(download.totalBytes)}")
-                "paused" -> tr(settings, "Download paused • ${formatSize(download.downloadedBytes)} saved, tap Download Model to resume", "下载已暂停 • 已保留 ${formatSize(download.downloadedBytes)}，点击下载模型继续")
-                "error" -> download.error ?: tr(settings, "Download failed", "下载失败")
-                else -> tr(settings, "Model not downloaded", "模型未下载")
-            },
-            color = Muted,
-            fontSize = 13.sp,
-        )
     }
 }
 
@@ -4348,17 +3911,6 @@ fun splitTranslationText(input: String, maxChars: Int = 800): List<String> {
         while (remaining.isNotEmpty() && remaining.first().isWhitespace()) remaining.deleteCharAt(0)
     }
     return chunks
-}
-
-@VisibleForTesting
-fun buildHyMt2Prompt(input: String, sourceLang: String, targetLang: String): String {
-    val source = if (sourceLang == "Auto") detectTranslationLanguage(input) else sourceLang
-    return if (source == "Chinese" || targetLang == "Chinese") {
-        val target = translationLanguageChineseNames[targetLang] ?: targetLang
-        "将以下文本翻译为${target}，注意只需要输出翻译后的结果，不要额外解释：\n\n$input"
-    } else {
-        "Translate the following segment into $targetLang, without additional explanation.\n\n$input"
-    }
 }
 
 object ImageProcessor {
