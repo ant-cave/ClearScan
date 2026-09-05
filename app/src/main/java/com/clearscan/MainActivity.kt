@@ -3371,7 +3371,7 @@ fun ShareScreen(state: UiState, model: ClearScanViewModel) {
             }
         }
     }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) { BottomNav(Tab.Docs, model::selectTab, model::openCamera) }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) { BottomNav(settings, Tab.Docs, model::selectTab, model::openCamera) }
 }
 
 @Composable
