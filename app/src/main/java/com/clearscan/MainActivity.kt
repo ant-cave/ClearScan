@@ -188,7 +188,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
@@ -3077,7 +3077,7 @@ fun CropEditor(
                         }
                         onPointsChange(localPoints)
                     }) {
-                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(-90f))
+                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = -90f })
                     }
                     Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = {
@@ -3088,7 +3088,7 @@ fun CropEditor(
                             }
                             onPointsChange(localPoints)
                         }) {
-                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(-180f))
+                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = -180f })
                         }
                         Icon(Icons.Default.Search, null, tint = Teal, modifier = Modifier.size(24.dp))
                         IconButton(onClick = {
@@ -3110,7 +3110,7 @@ fun CropEditor(
                         }
                         onPointsChange(localPoints)
                     }) {
-                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(90f))
+                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = 90f })
                     }
                 }
             }
