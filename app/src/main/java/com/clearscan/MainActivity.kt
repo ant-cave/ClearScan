@@ -118,6 +118,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DocumentScanner
@@ -141,13 +142,13 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material3.AlertDialog
@@ -185,6 +186,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -340,25 +342,11 @@ private fun defaultCropPoints() = listOf(
 
 private fun Offset.coerceCropPoint() = Offset(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
 
-private fun centeredCropRatio(widthOverHeight: Float): List<Offset> {
-    val margin = 0.06f
-    val maxW = 1f - margin * 2f
-    val maxH = 1f - margin * 2f
-    var w = maxW
-    var h = w / widthOverHeight
-    if (h > maxH) {
-        h = maxH
-        w = h * widthOverHeight
-    }
-    val left = (1f - w) / 2f
-    val top = (1f - h) / 2f
-    return listOf(
-        Offset(left, top),
-        Offset(left + w, top),
-        Offset(left + w, top + h),
-        Offset(left, top + h),
-    )
-}
+/** Maps normalized crop points into the coordinate space of a 90°-rotated bitmap. */
+private fun rotateCropPoints(points: List<Offset>, clockwise: Boolean): List<Offset> =
+    points.map { if (clockwise) Offset(1f - it.y, it.x) else Offset(it.y, 1f - it.x) }.map { it.coerceCropPoint() }
+
+private fun normalizeQuarters(quarters: Int): Int = ((quarters % 4) + 4) % 4
 
 fun encodeCropPoints(points: List<Offset>): String = points.take(4).joinToString(";") { "${it.x},${it.y}" }
 
@@ -546,7 +534,8 @@ data class UiState(
     val activeTool: String? = null,
     val selectedToolIds: Set<Long> = emptySet(),
     val toolOption: String = "Medium",
-    val cropPreset: String = "Original",
+    val cropPreset: String = "Original"
+    val scanRotationQuarters: Int = 0,
     val selectedFilter: String = "B&W",
     val translationState: TranslationState = TranslationState(),
     val savedResultDetail: Boolean = false,
@@ -947,7 +936,9 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun openDraftPage(page: DraftScanPageEntity, index: Int) {
-        val bitmap = ImageProcessor.decodeCameraBitmap(page.originalPath, 2560) ?: return
+        val decoded = ImageProcessor.decodeCameraBitmap(page.originalPath, 2560) ?: return
+        // Draft pages store their original capture unrotated; replay the saved rotation.
+        val bitmap = if (page.rotation != 0) ImageProcessor.rotateQuarters(decoded, page.rotation) else decoded
         val corners = decodeCropPoints(page.cropPoints)
         val update: UiState.() -> UiState = {
             copy(
@@ -960,6 +951,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 detectionStatus = if (page.confidence >= .54f) DocumentDetectionStatus.Detected else DocumentDetectionStatus.LowConfidence,
                 detectionConfidence = page.confidence,
                 cropPreset = if (page.confidence >= .54f) "Auto" else "Original",
+                scanRotationQuarters = page.rotation,
                 captureMessage = null,
             )
         }
@@ -1037,26 +1029,24 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             }
             return
         }
-        val ratio = when (label) {
-            "A4" -> 210f / 297f
-            "Letter" -> 8.5f / 11f
-            "Legal" -> 8.5f / 14f
-            else -> null
-        }
         detectionRequestId++
-        navFlow.value = navFlow.value.copy(cropPreset = label, cropPoints = ratio?.let { centeredCropRatio(it) } ?: defaultCropPoints())
+        navFlow.value = navFlow.value.copy(cropPreset = label, cropPoints = defaultCropPoints())
     }
 
     fun applyCropAndEdit() {
         val previewBitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val sourcePath = navFlow.value.scanSourcePath
         val points = navFlow.value.cropPoints.toList()
+        val quarters = navFlow.value.scanRotationQuarters
         viewModelScope.launch {
             navFlow.value = navFlow.value.copy(busy = true)
             val cropped = runCatching {
                 withContext(Dispatchers.Default) {
+                    // The in-memory preview already carries the on-screen rotation; the
+                    // full-resolution original does not, so replay the rotation there.
                     val workingBitmap = sourcePath
                         ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 4096) }
+                        ?.let { if (quarters != 0) ImageProcessor.rotateQuarters(it, quarters) else it }
                         ?: previewBitmap
                     val corrected = DocumentPerspectiveCorrector.crop(workingBitmap, points)
                     if (settingsFlow.value.cameraEnhance) ImageProcessor.enhanceDocument(corrected) else corrected
@@ -1080,6 +1070,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 val updatedDraft = currentDraft.copy(
                     processedPath = processedFile.absolutePath,
                     cropPoints = encodeCropPoints(points),
+                    rotation = normalizeQuarters(quarters),
                 )
                 dao.upsertDraftPage(updatedDraft)
                 val updatedPages = state.draftPages.toMutableList().also { it[state.currentDraftIndex] = updatedDraft }
@@ -1099,6 +1090,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                     autoCropPoints = emptyList(),
                     detectionStatus = DocumentDetectionStatus.Idle,
                     detectionConfidence = 0f,
+                    scanRotationQuarters = 0,
                     busy = false,
                 )
                 return@launch
@@ -1113,6 +1105,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 autoCropPoints = emptyList(),
                 detectionStatus = DocumentDetectionStatus.Idle,
                 detectionConfidence = 0f,
+                scanRotationQuarters = 0,
                 busy = false,
             )
         }
@@ -1134,9 +1127,53 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         go(Screen.Save)
     }
 
-    fun rotate() {
-        val bitmap = navFlow.value.processedBitmap ?: return
-        navFlow.value = navFlow.value.copy(processedBitmap = ImageProcessor.rotate(bitmap))
+    fun rotate(clockwise: Boolean = true) {
+        val state = navFlow.value
+        val bitmap = state.processedBitmap ?: state.scanBitmap ?: return
+        if (state.screen != Screen.Crop) {
+            navFlow.value = state.copy(processedBitmap = ImageProcessor.rotate(bitmap, clockwise))
+            return
+        }
+        // On the crop screen the rotation must keep the overlay and the detection result
+        // in sync with the rotated bitmap; scanBitmap is updated too because edge
+        // detection uses it as an identity check for stale requests.
+        val rotated = ImageProcessor.rotate(bitmap, clockwise)
+        val points = rotateCropPoints(state.cropPoints, clockwise)
+        val auto = rotateCropPoints(state.autoCropPoints, clockwise)
+        if (state.scanSourcePath == null) {
+            // Re-entered from the edit screen: the working bitmap is already the cropped
+            // result, so only the in-memory preview and points need to follow.
+            navFlow.value = state.copy(processedBitmap = rotated, scanBitmap = rotated, cropPoints = points, autoCropPoints = auto)
+            return
+        }
+        val quarters = state.scanRotationQuarters + if (clockwise) 1 else -1
+        navFlow.value = state.copy(
+            processedBitmap = rotated,
+            scanBitmap = rotated,
+            cropPoints = points,
+            autoCropPoints = auto,
+            scanRotationQuarters = quarters,
+        )
+        // Track the rotation on the persisted draft so the full-resolution original is
+        // rotated the same way when the crop is applied or the page is reopened.
+        val currentDraft = state.draftPages.getOrNull(state.currentDraftIndex) ?: return
+        viewModelScope.launch {
+            val updated = currentDraft.copy(rotation = normalizeQuarters(quarters), cropPoints = encodeCropPoints(points))
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    ImageProcessor.readBitmap(currentDraft.thumbnailPath, 1280)
+                        ?.let { ImageProcessor.rotate(it, clockwise) }
+                        ?.let { ImageProcessor.writeJpeg(it, File(currentDraft.thumbnailPath), 82) }
+                }
+            }
+            dao.upsertDraftPage(updated)
+            navFlow.value = navFlow.value.copy(draftPages = navFlow.value.draftPages.map { if (it.id == updated.id) updated else it })
+        }
+    }
+
+    /** Returns to the camera for another shot, replacing the current draft page. */
+    fun retakePhoto() {
+        if (navFlow.value.draftPages.isEmpty()) deleteScan() else deleteCurrentDraft(true)
     }
 
     fun deleteScan() {
@@ -1171,7 +1208,10 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 val id = System.currentTimeMillis()
                 val files = saveDirectory()
                 val sessionBitmaps = stateAtSave.draftPages.mapNotNull { page ->
+                    // Pages that never passed the crop step fall back to the unrotated
+                    // original, so replay the persisted rotation for those.
                     ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 4096)
+                        ?.let { if (page.processedPath.isBlank() && page.rotation != 0) ImageProcessor.rotateQuarters(it, page.rotation) else it }
                 }.toMutableList()
                 if (sessionBitmaps.isNotEmpty()) sessionBitmaps[sessionBitmaps.lastIndex] = bitmap
                 val pageBitmaps = sessionBitmaps.ifEmpty { mutableListOf(bitmap) }
@@ -2158,7 +2198,8 @@ fun DocumentRow(document: Document, model: ClearScanViewModel) {
 
 @Composable
 fun Thumbnail(path: String, modifier: Modifier = Modifier) {
-    val bitmap = remember(path) { ImageProcessor.readBitmap(path, 256) }
+    // Keyed on lastModified so rewritten files (e.g. rotated crop thumbnails) reload.
+    val bitmap = remember(path, File(path).lastModified()) { ImageProcessor.readBitmap(path, 256) }
     if (bitmap != null) {
         Image(bitmap.asImageBitmap(), null, modifier.clip(RoundedCornerShape(5.dp)).background(Soft), contentScale = ContentScale.Crop)
     } else {
@@ -2675,12 +2716,14 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
     val dark = isDarkTheme(settings)
     Column(Modifier.fillMaxSize().background(if (dark) ComposeColor(0xFF111317) else MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Crop", "裁剪"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::applyCropAndEdit, dark = dark)
-        Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp).clipToBounds(), contentAlignment = Alignment.Center) {
+            // No fillMaxWidth here: with loose constraints the aspectRatio modifier picks the
+            // largest size that fits inside the box, so tall shots can no longer overflow
+            // into the top bar or the bottom toolbar.
             CropEditor(
                 bitmap = state.processedBitmap ?: state.scanBitmap,
                 points = state.cropPoints,
                 onPointsChange = model::setCropPoints,
-                modifier = Modifier.fillMaxWidth(),
             )
             when (state.detectionStatus) {
                 DocumentDetectionStatus.Detecting -> Surface(
@@ -2736,7 +2779,7 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                 color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface,
                 fontSize = 13.sp,
             )
-            LazyRow(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyRow(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(state.draftPages.size, key = { state.draftPages[it].id }) { index ->
                     val page = state.draftPages[index]
                     var dragX by remember(page.id) { mutableFloatStateOf(0f) }
@@ -2761,40 +2804,41 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                     ) { Thumbnail(page.thumbnailPath, Modifier.fillMaxSize()) }
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = { model.deleteCurrentDraft(false) }) { Text(tr(settings, "Delete page", "删除此页")) }
-                TextButton(onClick = { model.deleteCurrentDraft(true) }) { Text(tr(settings, "Retake", "重新拍摄")) }
-            }
+            TextButton(
+                onClick = { model.deleteCurrentDraft(false) },
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+            ) { Text(tr(settings, "Delete page", "删除此页"), fontSize = 12.sp) }
         }
-        LazyRow(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(listOf("Auto", "Original", "A4", "Letter", "Legal", "More")) { label ->
-                val selected = state.cropPreset == label
-                val display = when (label) {
-                    "Auto" -> tr(settings, "Auto", "智能")
-                    "Original" -> tr(settings, "Original", "原始")
-                    "Letter" -> tr(settings, "Letter", "信纸")
-                    "Legal" -> tr(settings, "Legal", "法律")
-                    "More" -> tr(settings, "More", "更多")
-                    else -> label
-                }
-                Card(
-                    modifier = Modifier.clickable { model.setCropPreset(label) },
-                    colors = CardDefaults.cardColors(containerColor = if (selected) Teal else if (dark) ComposeColor(0xFF1D2025) else MaterialTheme.colorScheme.surface),
-                    shape = RoundedCornerShape(10.dp),
-                ) {
-                    Column(Modifier.size(86.dp).padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Icon(if (label == "Auto") Icons.Default.AutoAwesome else Icons.Default.Crop, null, tint = if (selected || dark) ComposeColor.White else Teal)
-                        Spacer(Modifier.height(8.dp))
-                        Text(display, color = if (selected || dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
-                    }
-                }
-            }
+        // Compact toolbar: smart crop, select-all crop, retake, rotate left/right.
+        Row(
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CropToolButton(tr(settings, "Smart Crop", "智能裁切"), Icons.Default.AutoAwesome, selected = state.cropPreset == "Auto", dark = dark) { model.setCropPreset("Auto") }
+            CropToolButton(tr(settings, "Select All", "全选裁切"), Icons.Default.CropFree, selected = state.cropPreset == "Original", dark = dark) { model.setCropPreset("Original") }
+            CropToolButton(tr(settings, "Retake", "再拍一张"), Icons.Default.AddAPhoto, dark = dark) { model.retakePhoto() }
+            CropToolButton(tr(settings, "Rotate Left", "左转"), Icons.Default.RotateLeft, dark = dark) { model.rotate(clockwise = false) }
+            CropToolButton(tr(settings, "Rotate Right", "右转"), Icons.Default.RotateRight, dark = dark) { model.rotate(clockwise = true) }
         }
-        Row(Modifier.fillMaxWidth().padding(bottom = 24.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-            Icon(Icons.Default.RotateRight, null, tint = ComposeColor.White, modifier = Modifier.size(36.dp).clickable { model.rotate() })
-            Icon(Icons.Default.RotateRight, null, tint = ComposeColor.White, modifier = Modifier.size(36.dp).clickable { model.rotate() })
-            Icon(Icons.Default.Tune, null, tint = ComposeColor.White, modifier = Modifier.size(36.dp))
-        }
+    }
+}
+
+@Composable
+fun CropToolButton(label: String, icon: ImageVector, selected: Boolean = false, dark: Boolean = false, onClick: () -> Unit) {
+    val content = if (selected) ComposeColor.White else if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
+    Column(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Teal else ComposeColor.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, label, tint = content, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.height(3.dp))
+        Text(label, fontSize = 11.sp, color = content, maxLines = 1)
     }
 }
 
@@ -4329,11 +4373,18 @@ object ImageProcessor {
         pdf.close()
     }
 
-    fun rotate(bitmap: Bitmap): Bitmap {
+    fun rotate(bitmap: Bitmap, clockwise: Boolean = true): Bitmap {
         val out = Bitmap.createBitmap(bitmap.height, bitmap.width, Bitmap.Config.ARGB_8888)
         val canvas = AndroidCanvas(out)
-        canvas.rotate(90f, out.width / 2f, out.height / 2f)
+        canvas.rotate(if (clockwise) 90f else -90f, out.width / 2f, out.height / 2f)
         canvas.drawBitmap(bitmap, (out.width - bitmap.width) / 2f, (out.height - bitmap.height) / 2f, Paint(Paint.ANTI_ALIAS_FLAG))
+        return out
+    }
+
+    /** Replays cumulative 90° rotations; negative and multi-turn values are normalized. */
+    fun rotateQuarters(bitmap: Bitmap, quarters: Int): Bitmap {
+        var out = bitmap
+        repeat(((quarters % 4) + 4) % 4) { out = rotate(out, clockwise = true) }
         return out
     }
 
