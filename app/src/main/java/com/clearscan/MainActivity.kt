@@ -99,7 +99,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -2404,6 +2407,14 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_AUTO) }
     var settingsOpen by remember { mutableStateOf(false) }
     var pendingMode by remember { mutableStateOf<ScanMode?>(null) }
+    var flashVisible by remember { mutableStateOf(false) }
+    val flashAlpha by animateFloatAsState(if (flashVisible) 1f else 0f, animationSpec = tween(durationMillis = 300), label = "flash")
+    LaunchedEffect(flashVisible) {
+        if (flashVisible) {
+            kotlinx.coroutines.delay(300)
+            flashVisible = false
+        }
+    }
     val analyzer = remember(state.scanMode) {
         when (state.scanMode) {
             ScanMode.QrCode, ScanMode.Barcode -> BarcodeAnalyzer(state.scanMode, model::onCodeDetected)
@@ -2483,6 +2494,13 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     Text(tr(settings, "Allow camera access to scan real documents", "允许相机权限后即可扫描真实文档"), color = ComposeColor.White, fontSize = 15.sp)
                 }
             }
+            if (flashAlpha > 0.01f) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(ComposeColor.White.copy(alpha = flashAlpha))
+                )
+            }
             if (state.captureMessage != null) {
                 Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 9.dp), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
@@ -2548,13 +2566,59 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
                 CameraSmallButton(Icons.Default.PhotoLibrary) { pickImage.launch("image/*") }
                 Box(Modifier.size(78.dp).clip(CircleShape).background(ComposeColor.White).border(5.dp, Teal, CircleShape).clickable {
-                    if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
+                    if (hasCameraPermission) {
+                        flashVisible = true
+                        takeRealPhoto(context, imageCapture, model, settings)
+                    } else permission.launch(Manifest.permission.CAMERA)
                 }, contentAlignment = Alignment.Center) {
                     Icon(Icons.Default.CameraAlt, null, tint = Teal, modifier = Modifier.size(34.dp))
                 }
-                CameraSmallButton(if (state.draftPages.isNotEmpty()) Icons.Default.Check else Icons.Default.DocumentScanner) {
-                    if (state.draftPages.isNotEmpty()) model.finishScanSession()
-                    else if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
+                if (state.draftPages.isNotEmpty()) {
+                    // 略缩图堆叠 + 红点角标
+                    Box(Modifier.size(50.dp), contentAlignment = Alignment.BottomEnd) {
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .offset(x = 2.dp, y = (-2).dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(ComposeColor(0xFF2A2A2A))
+                                .border(1.dp, ComposeColor(0xFF444444), RoundedCornerShape(8.dp))
+                        )
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .offset(x = (-2).dp, y = 2.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(ComposeColor(0xFF333333))
+                                .border(1.dp, ComposeColor(0xFF555555), RoundedCornerShape(8.dp))
+                        )
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(ComposeColor(0xFF1A1A1A))
+                                .border(1.5.dp, Teal, RoundedCornerShape(8.dp))
+                                .clickable { model.finishScanSession() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Default.DocumentScanner, null, tint = Teal, modifier = Modifier.size(24.dp))
+                        }
+                        Box(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = (-4).dp, y = 4.dp)
+                                .size(18.dp)
+                                .clip(CircleShape)
+                                .background(ComposeColor(0xFFE53935)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    CameraSmallButton(Icons.Default.DocumentScanner) {
+                        if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
+                    }
                 }
             }
             if (state.draftPages.isNotEmpty()) {
@@ -2948,6 +3012,7 @@ fun CropEditor(
     var localPoints by remember { mutableStateOf(points) }
     var canvasSize by remember { mutableStateOf(Size(1f, 1f)) }
     var selectedHandle by remember { mutableStateOf(-1) }
+    var fineTuneMode by remember { mutableStateOf(false) }
     var fineTuneDirection by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(points) {
         if (selectedHandle < 0 && points.size == 4 && localPoints.size == 4) {
@@ -2976,18 +3041,30 @@ fun CropEditor(
                                 index to hypot(start.x - handle.x, start.y - handle.y)
                             }
                             .minByOrNull { it.second }
-                        selectedHandle = if (nearest != null && nearest.second < 180f) nearest.first else -1
+                        if (nearest != null && nearest.second < 180f) {
+                            if (selectedHandle == nearest.first && fineTuneMode) {
+                                // tapped on already-selected handle while in fineTuneMode: keep drag mode
+                            } else {
+                                selectedHandle = nearest.first
+                                fineTuneMode = false
+                            }
+                        } else {
+                            selectedHandle = -1
+                            fineTuneMode = false
+                        }
                         fineTuneDirection = null
                     },
                     onDragEnd = {
                         val selected = selectedHandle
                         if (selected >= 0) onPointsChange(currentPoints)
                         selectedHandle = -1
+                        fineTuneMode = false
                         fineTuneDirection = null
                     },
                     onDragCancel = {
                         localPoints = points
                         selectedHandle = -1
+                        fineTuneMode = false
                         fineTuneDirection = null
                     },
                     onDrag = { change, drag ->
@@ -3031,13 +3108,21 @@ fun CropEditor(
             if (selectedHandle >= 0 && canvasSize.width > 0 && canvasSize.height > 0) {
                 val handlePos = Offset(currentPoints[selectedHandle].x * canvasSize.width, currentPoints[selectedHandle].y * canvasSize.height)
                 val zoomSize = 120f
+                val zoomOffsetY = 160f
                 Box(
                     Modifier
                         .size(zoomSize.dp)
                         .offset {
+                            val rawY = handlePos.y - zoomOffsetY
+                            val clampedY = if (rawY < 0f) {
+                                // 放大镜在手指下方显示
+                                (handlePos.y + 60f).coerceIn(0f, canvasSize.height - zoomSize)
+                            } else {
+                                rawY.coerceIn(0f, canvasSize.height - zoomSize)
+                            }
                             IntOffset(
                                 (handlePos.x - zoomSize / 2).coerceIn(0f, canvasSize.width - zoomSize).toInt(),
-                                (handlePos.y - zoomSize / 2).coerceIn(0f, canvasSize.height - zoomSize).toInt(),
+                                clampedY.toInt(),
                             )
                         }
                         .clip(RoundedCornerShape(12.dp))
@@ -3046,10 +3131,15 @@ fun CropEditor(
                 ) {
                 val zoomBitmap = rememberUpdatedState(
                     if (selectedHandle >= 0 && canvasSize.width > 0 && canvasSize.height > 0) {
-                        val sx = (currentPoints[selectedHandle].x * bitmap.width * 0.5f).toInt().coerceIn(0, bitmap.width - 1)
-                        val sy = (currentPoints[selectedHandle].y * bitmap.height * 0.5f).toInt().coerceIn(0, bitmap.height - 1)
-                        val sw = minOf(60, bitmap.width - sx)
-                        val sh = minOf(60, bitmap.height - sy)
+                        val handleNormX = currentPoints[selectedHandle].x
+                        val handleNormY = currentPoints[selectedHandle].y
+                        val cropRadius = 30
+                        val cx = (handleNormX * bitmap.width).toInt().coerceIn(cropRadius, bitmap.width - cropRadius)
+                        val cy = (handleNormY * bitmap.height).toInt().coerceIn(cropRadius, bitmap.height - cropRadius)
+                        val sx = (cx - cropRadius).coerceAtLeast(0)
+                        val sy = (cy - cropRadius).coerceAtLeast(0)
+                        val sw = minOf(cropRadius * 2, bitmap.width - sx)
+                        val sh = minOf(cropRadius * 2, bitmap.height - sy)
                         if (sw > 0 && sh > 0) Bitmap.createBitmap(bitmap, sx, sy, sw, sh) else null
                     } else null
                 ).value
@@ -3062,64 +3152,92 @@ fun CropEditor(
                         drawCircle(ComposeColor.White, 3f, Offset(cx, cy))
                     }
                 }
-                Column(
-                    Modifier
-                        .offset {
-                            IntOffset(
-                                (handlePos.x + 40f).coerceIn(0f, canvasSize.width - 70f).toInt(),
-                                (handlePos.y - 70f).coerceIn(0f, canvasSize.height - 70f).toInt(),
-                            )
-                        }
-                        .padding(4.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    IconButton(onClick = {
-                        fineTuneDirection = "up"
-                        localPoints = localPoints.toMutableList().also { list ->
-                            val idx = selectedHandle
-                            list[idx] = Offset(list[idx].x, (list[idx].y - 0.01f).coerceIn(0f, 1f))
-                        }
-                        onPointsChange(localPoints)
-                    }) {
-                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = -90f })
-                    }
-                    Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                // 微调按钮：单点触控切换微调模式，长按拖动时隐藏微调按钮
+                if (fineTuneMode) {
+                    Column(
+                        Modifier
+                            .offset {
+                                val offsetX = (handlePos.x - 80f).coerceIn(0f, canvasSize.width - 170f)
+                                val offsetY = (handlePos.y - 180f)
+                                val finalY = if (offsetY < 0f) {
+                                    (handlePos.y + 60f).coerceIn(0f, canvasSize.height - 170f)
+                                } else {
+                                    offsetY.coerceIn(0f, canvasSize.height - 170f)
+                                }
+                                IntOffset(offsetX.toInt(), finalY.toInt())
+                            }
+                            .size(168.dp, 168.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(ComposeColor(0xDD1A1A1A))
+                            .border(1.5.dp, Teal.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                            .clickable { /* 阻止点击穿透 */ },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        val step = 0.005f
                         IconButton(onClick = {
-                            fineTuneDirection = "left"
+                            fineTuneDirection = "up"
                             localPoints = localPoints.toMutableList().also { list ->
                                 val idx = selectedHandle
-                                list[idx] = Offset((list[idx].x - 0.01f).coerceIn(0f, 1f), list[idx].y)
+                                list[idx] = Offset(list[idx].x, (list[idx].y - step).coerceIn(0f, 1f))
                             }
                             onPointsChange(localPoints)
-                        }) {
-                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = -180f })
+                        }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = -90f })
                         }
-                        Icon(Icons.Default.Search, null, tint = Teal, modifier = Modifier.size(24.dp))
+                        Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = {
+                                fineTuneDirection = "left"
+                                localPoints = localPoints.toMutableList().also { list ->
+                                    val idx = selectedHandle
+                                    list[idx] = Offset((list[idx].x - step).coerceIn(0f, 1f), list[idx].y)
+                                }
+                                onPointsChange(localPoints)
+                            }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = -180f })
+                            }
+                            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Search, null, tint = Teal, modifier = Modifier.size(22.dp))
+                            }
+                            IconButton(onClick = {
+                                fineTuneDirection = "right"
+                                localPoints = localPoints.toMutableList().also { list ->
+                                    val idx = selectedHandle
+                                    list[idx] = Offset((list[idx].x + step).coerceIn(0f, 1f), list[idx].y)
+                                }
+                                onPointsChange(localPoints)
+                            }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(20.dp))
+                            }
+                        }
                         IconButton(onClick = {
-                            fineTuneDirection = "right"
+                            fineTuneDirection = "down"
                             localPoints = localPoints.toMutableList().also { list ->
                                 val idx = selectedHandle
-                                list[idx] = Offset((list[idx].x + 0.01f).coerceIn(0f, 1f), list[idx].y)
+                                list[idx] = Offset(list[idx].x, (list[idx].y + step).coerceIn(0f, 1f))
                             }
                             onPointsChange(localPoints)
-                        }) {
-                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp))
+                        }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = 90f })
                         }
-                    }
-                    IconButton(onClick = {
-                        fineTuneDirection = "down"
-                        localPoints = localPoints.toMutableList().also { list ->
-                            val idx = selectedHandle
-                            list[idx] = Offset(list[idx].x, (list[idx].y + 0.01f).coerceIn(0f, 1f))
-                        }
-                        onPointsChange(localPoints)
-                    }) {
-                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).graphicsLayer { rotationZ = 90f })
                     }
                 }
             }
         }
+    }
+    // 单点触控：点击已选中手柄切换微调模式
+    if (selectedHandle >= 0) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(selectedHandle) {
+                    detectTapGestures(
+                        onTap = {
+                            fineTuneMode = !fineTuneMode
+                        }
+                    )
+                }
+        )
     }
 }
 
@@ -3455,27 +3573,42 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
         if (uri != null) model.exportDocumentAsPdf(doc, uri)
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(doc.title, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${doc.type}    ${formatDate(doc.createdAt)}  •  ${formatSize(doc.sizeBytes)}", color = Muted, fontSize = 13.sp)
+                Text(doc.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${doc.type}    ${formatDate(doc.createdAt)}  •  ${formatSize(doc.sizeBytes)}", color = Muted, fontSize = 12.sp)
             }
-            IconButton(onClick = { renameOpen = true }) { Icon(Icons.Default.Edit, null) }
+            IconButton(onClick = { renameOpen = true }) { Icon(Icons.Default.Edit, null, modifier = Modifier.size(20.dp)) }
         }
-        Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp), contentAlignment = Alignment.Center) {
-            DocumentPreviewPages(doc, state.settings, model)
-        }
-        Row(Modifier.fillMaxWidth().height(104.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
-            EditTool(tr(state.settings, "Export PDF", "导出PDF"), Icons.Default.PictureAsPdf) { exportPdf.launch("${doc.title}.pdf") }
-            EditTool(tr(state.settings, "Share", "分享"), Icons.Default.Share, model::shareSelected)
-            EditTool(tr(state.settings, "Edit", "编辑"), Icons.Default.Edit) { model.toEdit() }
-            EditTool(tr(state.settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
-            EditTool(tr(state.settings, "Delete", "删除"), Icons.Default.Delete, model::deleteSelected)
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-            TextButton(onClick = { passwordOpen = true }) { Text(tr(state.settings, "Password", "密码")) }
-            TextButton(onClick = { moveOpen = true }) { Text(tr(state.settings, "Move to folder", "移动到文件夹")) }
+        DocumentPreviewPages(doc, state.settings, model, Modifier.weight(1f).fillMaxWidth())
+        // 重做底栏：紧凑单行设计
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                DetailToolIcon(tr(state.settings, "PDF", "PDF"), Icons.Default.PictureAsPdf) { exportPdf.launch("${doc.title}.pdf") }
+                DetailToolIcon(tr(state.settings, "Share", "分享"), Icons.Default.Share) { model.shareSelected() }
+                DetailToolIcon(tr(state.settings, "Edit", "编辑"), Icons.Default.Edit) { model.toEdit() }
+                DetailToolIcon(tr(state.settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
+                DetailToolIcon(tr(state.settings, "Delete", "删除"), Icons.Default.Delete) { model.deleteSelected() }
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.Center) {
+                TextButton(onClick = { passwordOpen = true }) {
+                    Icon(Icons.Default.Lock, null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(tr(state.settings, "Password", "密码"), fontSize = 12.sp)
+                }
+                TextButton(onClick = { moveOpen = true }) {
+                    Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(tr(state.settings, "Move", "移动"), fontSize = 12.sp)
+                }
+            }
         }
     }
     if (renameOpen) RenameDialog(state.settings, doc.title, onDismiss = { renameOpen = false }, onRename = { model.renameSelected(it); renameOpen = false })
@@ -3500,7 +3633,16 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
 }
 
 @Composable
-fun DocumentPreviewPages(document: Document, settings: AppSettings, model: ClearScanViewModel) {
+fun DetailToolIcon(label: String, icon: ImageVector, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Icon(icon, null, modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(2.dp))
+        Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+@Composable
+fun DocumentPreviewPages(document: Document, settings: AppSettings, model: ClearScanViewModel, modifier: Modifier = Modifier) {
     var pages by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf<List<Bitmap>>(emptyList()) }
     var loaded by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf(false) }
     LaunchedEffect(document.id, document.exportPath, document.pageCount) {
@@ -3510,27 +3652,74 @@ fun DocumentPreviewPages(document: Document, settings: AppSettings, model: Clear
     }
     if (pages.isEmpty()) {
         if (loaded) {
-            Thumbnail(document.thumbnailPath, Modifier.fillMaxWidth().aspectRatio(.72f))
+            Thumbnail(document.thumbnailPath, modifier.aspectRatio(.72f))
         } else {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(modifier, contentAlignment = Alignment.Center) {
                 Text(tr(settings, "Loading preview...", "正在加载预览..."), color = Muted)
             }
         }
         return
     }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        contentPadding = PaddingValues(bottom = 18.dp),
-    ) {
-        items(pages.size) { index ->
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                ScanBitmap(pages[index], Modifier.fillMaxWidth().aspectRatio(pages[index].width.toFloat() / pages[index].height.toFloat()))
-                if (pages.size > 1) {
-                    Spacer(Modifier.height(6.dp))
-                    Text("${index + 1} / ${pages.size}", color = Muted, fontSize = 13.sp)
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        scale = (scale * zoomChange).coerceIn(1f, 5f)
+        if (scale > 1f) {
+            offset = Offset(
+                (offset.x + panChange.x).coerceIn(-(scale - 1) * 400f, (scale - 1) * 400f),
+                (offset.y + panChange.y).coerceIn(-(scale - 1) * 400f, (scale - 1) * 400f),
+            )
+        } else {
+            offset = Offset.Zero
+        }
+    }
+    Box(modifier.clipToBounds()) {
+        LazyColumn(
+            Modifier
+                .fillMaxSize()
+                .transformable(transformState)
+                .pointerInput(scale) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (scale > 1.5f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                            } else {
+                                scale = 2.5f
+                            }
+                        }
+                    )
                 }
+                .offset { IntOffset(offset.x.toInt(), offset.y.toInt()) },
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            contentPadding = PaddingValues(bottom = 18.dp),
+        ) {
+            items(pages.size) { index ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    ScanBitmap(pages[index], Modifier.fillMaxWidth().aspectRatio(pages[index].width.toFloat() / pages[index].height.toFloat()))
+                    if (pages.size > 1) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("${index + 1} / ${pages.size}", color = Muted, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+        if (scale > 1f) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(12.dp)
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(ComposeColor(0x99000000))
+                    .clickable {
+                        scale = 1f
+                        offset = Offset.Zero
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("1:1", color = ComposeColor.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
