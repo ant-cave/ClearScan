@@ -71,6 +71,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -178,6 +180,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.key
@@ -537,6 +540,8 @@ data class UiState(
     val cropPreset: String = "Original",
     val scanRotationQuarters: Int = 0,
     val selectedFilter: String = "B&W",
+    /** Bumped after each per-page edit so the edit pager reloads its page bitmaps. */
+    val editVersion: Int = 0,
     val translationState: TranslationState = TranslationState(),
     val savedResultDetail: Boolean = false,
     val legalTitle: String = "",
@@ -1074,12 +1079,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 )
                 dao.upsertDraftPage(updatedDraft)
                 val updatedPages = state.draftPages.toMutableList().also { it[state.currentDraftIndex] = updatedDraft }
-                val nextIndex = state.currentDraftIndex + 1
-                if (nextIndex < updatedPages.size) {
-                    navFlow.value = state.copy(draftPages = updatedPages, busy = false)
-                    openDraftPage(updatedPages[nextIndex], nextIndex)
-                    return@launch
-                }
                 navFlow.value = state.copy(
                     screen = Screen.Edit,
                     draftPages = updatedPages,
@@ -1198,36 +1197,63 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         navFlow.value = state.copy(screen = Screen.Edit, backStack = stack, processedBitmap = ImageProcessor.adjust(base, brightness, contrast, saturation))
     }
 
-    fun saveDocument(title: String, type: String, quality: String) {
+    /** Applies a filter to one page of the edit pager and persists it as that page's processed image. */
+    fun applyFilterToPage(index: Int, filter: String, params: FilterParams = FilterParams()) {
+        val state = navFlow.value
+        val page = state.draftPages.getOrNull(index)
+        if (page == null) {
+            applyFilter(filter, params)
+            return
+        }
+        val sourcePath = page.processedPath.ifBlank { page.originalPath }
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(busy = true)
+            val base = withContext(Dispatchers.IO) {
+                val b = ImageProcessor.readBitmap(sourcePath, 2560)
+                if (page.processedPath.isBlank() && b != null && page.rotation != 0) ImageProcessor.rotateQuarters(b, page.rotation) else b
+            } ?: run { navFlow.value = navFlow.value.copy(busy = false); return@launch }
+            val filtered = withContext(Dispatchers.Default) { ImageProcessor.filter(base, filter, params) }
+                ?: run { navFlow.value = navFlow.value.copy(busy = false); return@launch }
+            val processedFile = File(page.originalPath).parentFile?.let { File(it, "${page.id}-filtered.jpg") }
+                ?: File(getApplication<Application>().filesDir, "${page.id}-filtered.jpg")
+            withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(filtered, processedFile, 88) }
+            val updated = page.copy(processedPath = processedFile.absolutePath)
+            dao.upsertDraftPage(updated)
+            val current = navFlow.value
+            navFlow.value = current.copy(
+                draftPages = current.draftPages.map { if (it.id == updated.id) updated else it },
+                processedBitmap = filtered,
+                scanBitmap = filtered,
+                selectedFilter = filter,
+                editVersion = current.editVersion + 1,
+                busy = false,
+            )
+        }
+    }
+
+    fun saveDocument(title: String, quality: String) {
         val bitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val stateAtSave = navFlow.value
-        AppLogger.i("Document", "Save document title=$title type=$type quality=$quality bitmap=${bitmap.width}x${bitmap.height}")
+        AppLogger.i("Document", "Save document title=$title quality=$quality bitmap=${bitmap.width}x${bitmap.height}")
         viewModelScope.launch {
             navFlow.value = navFlow.value.copy(busy = true)
             val saved = withContext(Dispatchers.IO) {
                 val id = System.currentTimeMillis()
                 val files = saveDirectory()
                 val sessionBitmaps = stateAtSave.draftPages.mapNotNull { page ->
-                    // Pages that never passed the crop step fall back to the unrotated
-                    // original, so replay the persisted rotation for those.
+                    // Storage is image-only: pages that never passed the crop/filter step fall
+                    // back to the unrotated original, so replay the persisted rotation there.
                     ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 4096)
                         ?.let { if (page.processedPath.isBlank() && page.rotation != 0) ImageProcessor.rotateQuarters(it, page.rotation) else it }
                 }.toMutableList()
-                if (sessionBitmaps.isNotEmpty()) sessionBitmaps[sessionBitmaps.lastIndex] = bitmap
                 val pageBitmaps = sessionBitmaps.ifEmpty { mutableListOf(bitmap) }
                 val imageFile = File(files, "$id-page.jpg")
                 ImageProcessor.writeJpeg(pageBitmaps.first(), imageFile, quality)
-                val export = if (type == "PDF") {
-                    val pdf = File(files, "$id.pdf")
-                    ImageProcessor.writePdf(pageBitmaps, pdf)
-                    pdf
-                } else {
-                    File(files, "$id.jpg").also { ImageProcessor.writeJpeg(pageBitmaps.first(), it, quality) }
-                }
+                val export = File(files, "$id.jpg").also { ImageProcessor.writeJpeg(pageBitmaps.first(), it, quality) }
                 val doc = Document(
                     id = id,
                     title = title.ifBlank { "Untitled Scan" },
-                    type = type,
+                    type = "JPG",
                     createdAt = id,
                     sizeBytes = export.length(),
                     pageCount = pageBitmaps.size,
@@ -1306,6 +1332,25 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     fun shareSelected() {
         AppLogger.i("Share", "Open share for document ${navFlow.value.selected?.id}")
         go(Screen.Share)
+    }
+
+    /** Exports a saved image-only document to a user-chosen PDF file (no PDF stored in the library). */
+    fun exportDocumentAsPdf(document: Document, uri: android.net.Uri) {
+        viewModelScope.launch {
+            val pages = loadDocumentPages(document)
+            if (pages.isEmpty()) return@launch
+            withContext(Dispatchers.IO) {
+                val app = getApplication<Application>()
+                val tmp = File(app.cacheDir, "export-${System.currentTimeMillis()}.pdf")
+                runCatching { ImageProcessor.writePdf(pages, tmp) }
+                    .onSuccess {
+                        runCatching {
+                            app.contentResolver.openOutputStream(uri)?.use { out -> tmp.inputStream().use { it.copyTo(out) } }
+                        }
+                    }
+                tmp.delete()
+            }
+        }
     }
 
     fun renameSelected(title: String) {
@@ -2801,7 +2846,15 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                                 )
                             }
                             .clickable { model.selectDraftPage(index) },
-                    ) { Thumbnail(page.thumbnailPath, Modifier.fillMaxSize()) }
+                    ) {
+                        Thumbnail(page.thumbnailPath, Modifier.fillMaxSize())
+                        // Static blue crop border as a hint: no handles, not editable here. Tap the
+                        // thumbnail to switch to the large image and edit there.
+                        CropOutlineOverlay(
+                            points = decodeCropPoints(page.cropPoints),
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             }
             TextButton(
@@ -2839,6 +2892,23 @@ fun CropToolButton(label: String, icon: ImageVector, selected: Boolean = false, 
         Icon(icon, label, tint = content, modifier = Modifier.size(20.dp))
         Spacer(Modifier.height(3.dp))
         Text(label, fontSize = 11.sp, color = content, maxLines = 1)
+    }
+}
+
+/** Static blue quadrilateral hint of a page's crop region (no draggable handles). */
+@Composable
+fun CropOutlineOverlay(points: List<Offset>, modifier: Modifier = Modifier) {
+    if (points.size < 4) return
+    Canvas(modifier) {
+        val outline = Path()
+        points.take(4).forEachIndexed { i, p ->
+            val x = p.x * size.width
+            val y = p.y * size.height
+            if (i == 0) outline.moveTo(x, y) else outline.lineTo(x, y)
+        }
+        outline.close()
+        drawPath(outline, ComposeColor(0x221E88FF), style = Stroke(width = size.minDimension / 8f))
+        drawPath(outline, ComposeColor(0xFF1E88FF), style = Stroke(width = size.minDimension / 24f))
     }
 }
 
@@ -2940,67 +3010,66 @@ fun CropEditor(
 @Composable
 fun EditScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
-    var previewZoom by remember { mutableFloatStateOf(1f) }
-    var previewPan by remember { mutableStateOf(Offset.Zero) }
-    var toolsExpanded by remember { mutableStateOf(false) }
-    var rotationTarget by remember { mutableFloatStateOf(0f) }
-    var rotationKick by remember { mutableStateOf(0) }
-    val animatedRotation by animateFloatAsState(rotationTarget, animationSpec = tween(260), label = "scan-rotation")
-    LaunchedEffect(rotationKick) {
-        if (rotationKick > 0) {
-            rotationTarget = -90f
-            delay(16)
-            rotationTarget = 0f
+    val draftPages = state.draftPages
+    val pageCount = draftPages.size.coerceAtLeast(1)
+    val initialPage = state.currentDraftIndex.coerceIn(0, pageCount - 1).coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage) { pageCount }
+    val currentPageIndex = pagerState.currentPage.coerceAtMost(pageCount - 1)
+    val currentPage = draftPages.getOrNull(currentPageIndex)
+    val filters = remember { DocumentFilters }
+    // Current page's source image; filtered pages reload when the edit version bumps.
+    val pageBitmap by produceState<Bitmap?>(initialValue = null, currentPage?.id, state.editVersion) {
+        value = withContext(Dispatchers.IO) {
+            if (currentPage == null) {
+                if (draftPages.isEmpty()) state.processedBitmap ?: state.scanBitmap else null
+            } else {
+                val p = currentPage.processedPath.ifBlank { currentPage.originalPath }
+                val b = ImageProcessor.readBitmap(p, 1400)
+                if (b != null && currentPage.processedPath.isBlank() && currentPage.rotation != 0) ImageProcessor.rotateQuarters(b, currentPage.rotation) else b
+            }
         }
+    }
+    val thumbSource = remember(pageBitmap) { ImageProcessor.previewBitmap(pageBitmap, 288) }
+    var thumbPreviews by remember(thumbSource) { mutableStateOf<Map<String, Bitmap?>>(emptyMap()) }
+    LaunchedEffect(thumbSource) {
+        thumbPreviews = withContext(Dispatchers.Default) { filters.associateWith { filter -> ImageProcessor.filter(thumbSource, filter) } }
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Edit", "编辑"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::toSave)
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp)
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, panChange, zoomChange, _ ->
-                        previewZoom = (previewZoom * zoomChange).coerceIn(1f, 4f)
-                        previewPan += panChange
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            ScanBitmap(
-                state.processedBitmap ?: state.scanBitmap,
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(.72f)
-                    .graphicsLayer(scaleX = previewZoom, scaleY = previewZoom, translationX = previewPan.x, translationY = previewPan.y, rotationZ = animatedRotation),
+        if (draftPages.size > 1) {
+            Text(
+                tr(settings, "Page ${currentPageIndex + 1} of ${draftPages.size}", "第 ${currentPageIndex + 1} 页，共 ${draftPages.size} 页"),
+                Modifier.fillMaxWidth().padding(top = 4.dp), textAlign = TextAlign.Center, color = Muted, fontSize = 13.sp,
             )
         }
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(if (toolsExpanded) 168.dp else 112.dp)
-                .navigationBarsPadding()
-                .pointerInput(Unit) {
-                    detectDragGestures { change, drag ->
-                        if (abs(drag.y) > abs(drag.x)) {
-                            change.consume()
-                            if (drag.y < -20f) toolsExpanded = true
-                            if (drag.y > 20f) toolsExpanded = false
+        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth()) { index ->
+            val page = draftPages.getOrNull(index)
+            val fallback = if (draftPages.isEmpty()) state.processedBitmap ?: state.scanBitmap else null
+            Box(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
+                val bitmap by produceState<Bitmap?>(initialValue = fallback, page?.id, state.editVersion) {
+                    value = withContext(Dispatchers.IO) {
+                        if (page == null) fallback
+                        else {
+                            val p = page.processedPath.ifBlank { page.originalPath }
+                            val b = ImageProcessor.readBitmap(p, 1400)
+                            if (b != null && page.processedPath.isBlank() && page.rotation != 0) ImageProcessor.rotateQuarters(b, page.rotation) else b
                         }
                     }
-                },
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            EditTool(tr(settings, "Filter", "滤镜"), Icons.Default.Palette, model::toFilter)
-            EditTool(tr(settings, "Enhance", "增强"), Icons.Default.AutoAwesome, model::toAdjust)
-            EditTool(tr(settings, "Crop", "裁剪"), Icons.Default.Crop, model::toCrop)
-            EditTool(tr(settings, "Rotate", "旋转"), Icons.Default.RotateRight) {
-                model.rotate()
-                rotationKick += 1
+                }
+                ScanBitmap(bitmap ?: fallback, Modifier.fillMaxWidth().aspectRatio(.72f))
             }
-            EditTool(tr(settings, "Delete", "删除"), Icons.Default.Delete, model::deleteScan)
+        }
+        // Directly show every filter effect for the current page; tapping applies it to that page.
+        LazyRow(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(filters) { filter ->
+                val selected = filter == state.selectedFilter
+                val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
+                Column(Modifier.width(84.dp).clickable { model.applyFilterToPage(currentPageIndex, filter) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp).clip(RoundedCornerShape(6.dp)))
+                    Spacer(Modifier.height(6.dp))
+                    Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
+                }
+            }
         }
     }
 }
@@ -3196,7 +3265,6 @@ fun Adjustment(label: String, value: Float, range: ClosedFloatingPointRange<Floa
 @Composable
 fun SaveScreen(state: UiState, model: ClearScanViewModel) {
     var title by remember { mutableStateOf("Contract Agreement") }
-    var type by remember { mutableStateOf("PDF") }
     var quality by remember { mutableStateOf("High") }
     val settings = state.settings
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
@@ -3207,13 +3275,16 @@ fun SaveScreen(state: UiState, model: ClearScanViewModel) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(tr(settings, "Title", "标题"), color = Muted, fontSize = 16.sp)
             OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), singleLine = true)
-            SelectField(tr(settings, "File Type", "文件类型"), type, listOf("PDF", "JPG")) { type = it }
             SelectField(tr(settings, "Image Quality", "图片质量"), quality, listOf("High", "Medium", "Low"), displayValue = { qualityLabel(settings, it) }) { quality = it }
-            Button(onClick = { model.saveDocument(title, type, quality) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(12.dp)) {
+            Button(onClick = { model.saveDocument(title, quality) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(12.dp)) {
                 Icon(Icons.Default.Save, null)
                 Spacer(Modifier.width(12.dp))
                 Text(if (state.busy) tr(settings, "Saving...", "保存中...") else tr(settings, "Save", "保存"), fontSize = 18.sp)
             }
+            Text(
+                tr(settings, "Saved as images only. You can export a PDF later from the document page.", "只会保存为图片。你可以在文档页随时导出 PDF。"),
+                color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp),
+            )
             Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(tr(settings, "Save to", "保存到"), color = Muted, fontSize = 17.sp)
                 Text("${savePathLabel(settings, state.settings.defaultSavePath)}  ›", color = Muted, fontSize = 17.sp)
@@ -3264,6 +3335,9 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
     var renameOpen by remember { mutableStateOf(false) }
     var passwordOpen by remember { mutableStateOf(false) }
     var moveOpen by remember { mutableStateOf(false) }
+    val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+        if (uri != null) model.exportDocumentAsPdf(doc, uri)
+    }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
@@ -3277,13 +3351,16 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
             DocumentPreviewPages(doc, state.settings, model)
         }
         Row(Modifier.fillMaxWidth().height(104.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
+            EditTool(tr(state.settings, "Export PDF", "导出PDF"), Icons.Default.PictureAsPdf) { exportPdf.launch("${doc.title}.pdf") }
             EditTool(tr(state.settings, "Share", "分享"), Icons.Default.Share, model::shareSelected)
             EditTool(tr(state.settings, "Edit", "编辑"), Icons.Default.Edit) { model.toEdit() }
             EditTool(tr(state.settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
-            EditTool(if (state.settings.passwordMap.containsKey(doc.id)) tr(state.settings, "Locked", "已锁定") else tr(state.settings, "Password", "密码"), Icons.Default.Lock) { passwordOpen = true }
             EditTool(tr(state.settings, "Delete", "删除"), Icons.Default.Delete, model::deleteSelected)
         }
-        TextButton(onClick = { moveOpen = true }, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text(tr(state.settings, "Move to folder", "移动到文件夹")) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            TextButton(onClick = { passwordOpen = true }) { Text(tr(state.settings, "Password", "密码")) }
+            TextButton(onClick = { moveOpen = true }) { Text(tr(state.settings, "Move to folder", "移动到文件夹")) }
+        }
     }
     if (renameOpen) RenameDialog(state.settings, doc.title, onDismiss = { renameOpen = false }, onRename = { model.renameSelected(it); renameOpen = false })
     if (passwordOpen) PasswordDialog(
