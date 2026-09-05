@@ -2537,7 +2537,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                         it.second,
                         Modifier.clip(RoundedCornerShape(6.dp)).background(if (selected) Teal.copy(alpha = .18f) else ComposeColor.Transparent).clickable {
                             if (state.draftPages.isNotEmpty() && it.first != state.scanMode) pendingMode = it.first else model.changeScanMode(it.first)
-                        }.padding(horizontal = 10.dp, vertical = 7.dp),
+                        }.padding(horizontal = 10.dp, vertical = 12.dp),
                         color = if (selected) Teal else ComposeColor.White,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -2554,7 +2554,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                         val selected = mode == state.documentCaptureMode
                         Text(
                             label,
-                            Modifier.clip(RoundedCornerShape(5.dp)).background(if (selected) Teal else ComposeColor.Transparent).clickable { model.changeDocumentCaptureMode(mode) }.padding(horizontal = 18.dp, vertical = 6.dp),
+                            Modifier.clip(RoundedCornerShape(5.dp)).background(if (selected) Teal else ComposeColor.Transparent).clickable { model.changeDocumentCaptureMode(mode) }.padding(horizontal = 18.dp, vertical = 10.dp),
                             color = ComposeColor.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -2607,12 +2607,12 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                             Modifier
                                 .align(Alignment.TopEnd)
                                 .offset(x = (-4).dp, y = 4.dp)
-                                .size(18.dp)
+                                .size(20.dp)
                                 .clip(CircleShape)
                                 .background(ComposeColor(0xFFE53935)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 } else {
@@ -3009,6 +3009,8 @@ fun CropEditor(
         return
     }
     val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+    val density = LocalDensity.current
+    val handleThresholdPx = with(density) { 72.dp.toPx() }
     var localPoints by remember { mutableStateOf(points) }
     var canvasSize by remember { mutableStateOf(Size(1f, 1f)) }
     var selectedHandle by remember { mutableStateOf(-1) }
@@ -3041,7 +3043,7 @@ fun CropEditor(
                                 index to hypot(start.x - handle.x, start.y - handle.y)
                             }
                             .minByOrNull { it.second }
-                        if (nearest != null && nearest.second < 180f) {
+                        if (nearest != null && nearest.second < handleThresholdPx) {
                             if (selectedHandle == nearest.first && fineTuneMode) {
                                 // tapped on already-selected handle while in fineTuneMode: keep drag mode
                             } else {
@@ -3185,7 +3187,7 @@ fun CropEditor(
                         }, modifier = Modifier.size(44.dp)) {
                             Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = -90f })
                         }
-                        Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = {
                                 fineTuneDirection = "left"
                                 localPoints = localPoints.toMutableList().also { list ->
@@ -3634,10 +3636,10 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
 
 @Composable
 fun DetailToolIcon(label: String, icon: ImageVector, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 4.dp)) {
-        Icon(icon, null, modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
-        Spacer(Modifier.height(2.dp))
-        Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Icon(icon, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(4.dp))
+        Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -3662,18 +3664,20 @@ fun DocumentPreviewPages(document: Document, settings: AppSettings, model: Clear
     }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var viewportSize by remember { mutableStateOf(Size(1f, 1f)) }
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 5f)
+        val maxPan = (scale - 1f) * maxOf(viewportSize.width, viewportSize.height) * 0.5f
         if (scale > 1f) {
             offset = Offset(
-                (offset.x + panChange.x).coerceIn(-(scale - 1) * 400f, (scale - 1) * 400f),
-                (offset.y + panChange.y).coerceIn(-(scale - 1) * 400f, (scale - 1) * 400f),
+                (offset.x + panChange.x).coerceIn(-maxPan, maxPan),
+                (offset.y + panChange.y).coerceIn(-maxPan, maxPan),
             )
         } else {
             offset = Offset.Zero
         }
     }
-    Box(modifier.clipToBounds()) {
+    Box(modifier.clipToBounds().onSizeChanged { viewportSize = Size(it.width.toFloat(), it.height.toFloat()) }) {
         LazyColumn(
             Modifier
                 .fillMaxSize()
@@ -3691,17 +3695,25 @@ fun DocumentPreviewPages(document: Document, settings: AppSettings, model: Clear
                     )
                 }
                 .offset { IntOffset(offset.x.toInt(), offset.y.toInt()) },
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             contentPadding = PaddingValues(bottom = 18.dp),
         ) {
             items(pages.size) { index ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     ScanBitmap(pages[index], Modifier.fillMaxWidth().aspectRatio(pages[index].width.toFloat() / pages[index].height.toFloat()))
-                    if (pages.size > 1) {
-                        Spacer(Modifier.height(6.dp))
-                        Text("${index + 1} / ${pages.size}", color = Muted, fontSize = 13.sp)
-                    }
+                if (pages.size > 1) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "${index + 1} / ${pages.size}",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ComposeColor(0x1A000000))
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                    )
+                }
                 }
             }
         }
@@ -3710,7 +3722,7 @@ fun DocumentPreviewPages(document: Document, settings: AppSettings, model: Clear
                 Modifier
                     .align(Alignment.BottomEnd)
                     .padding(12.dp)
-                    .size(32.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
                     .background(ComposeColor(0x99000000))
                     .clickable {
@@ -3719,7 +3731,7 @@ fun DocumentPreviewPages(document: Document, settings: AppSettings, model: Clear
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text("1:1", color = ComposeColor.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("1:1", color = ComposeColor.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
