@@ -841,6 +841,26 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun importBitmaps(uris: List<Uri>, context: Context) {
+        viewModelScope.launch {
+            var captured = 0
+            for (uri in uris) {
+                val bitmap = withContext(Dispatchers.IO) {
+                    ImageProcessor.decodeUriBitmap(context, uri, maxDimension = 4096)
+                }
+                if (bitmap != null) {
+                    appendCapturedBitmap(bitmap, null)
+                    captured++
+                }
+            }
+            if (captured == 0) {
+                navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Unable to open any images.", "无法打开任何图片"))
+            } else {
+                navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Imported $captured page(s)", "已导入 $captured 页"))
+            }
+        }
+    }
+
     private suspend fun appendCapturedBitmap(bitmap: Bitmap, sourceFile: File?) {
         val state = navFlow.value
         val sessionId = state.scanSessionId ?: System.currentTimeMillis().also { id ->
@@ -1041,71 +1061,70 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     fun applyCropAndEdit() {
         val previewBitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val sourcePath = navFlow.value.scanSourcePath
-        val points = navFlow.value.cropPoints.toList()
         val quarters = navFlow.value.scanRotationQuarters
+        val selectedFilter = navFlow.value.selectedFilter
+        val filterParams = FilterParams()
+        val allPages = navFlow.value.draftPages.toList()
+        if (allPages.isEmpty()) return
         viewModelScope.launch {
             navFlow.value = navFlow.value.copy(busy = true)
-            val cropped = runCatching {
-                withContext(Dispatchers.Default) {
-                    // The in-memory preview already carries the on-screen rotation; the
-                    // full-resolution original does not, so replay the rotation there.
-                    val workingBitmap = sourcePath
-                        ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 4096) }
-                        ?.let { if (quarters != 0) ImageProcessor.rotateQuarters(it, quarters) else it }
-                        ?: previewBitmap
-                    val corrected = DocumentPerspectiveCorrector.crop(workingBitmap, points)
-                    if (settingsFlow.value.cameraEnhance) ImageProcessor.enhanceDocument(corrected) else corrected
+            val processedPages = mutableListOf<DraftScanPageEntity>()
+            var hasError = false
+            for (page in allPages) {
+                val pagePoints = decodeCropPoints(page.cropPoints)
+                val pageQuarters = page.rotation
+                val result = runCatching {
+                    withContext(Dispatchers.Default) {
+                        val workingBitmap = sourcePath
+                            ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 4096) }
+                            ?.let { if (pageQuarters != 0) ImageProcessor.rotateQuarters(it, pageQuarters) else it }
+                            ?: previewBitmap
+                        val corrected = DocumentPerspectiveCorrector.crop(workingBitmap, pagePoints)
+                        val enhanced = if (settingsFlow.value.cameraEnhance) ImageProcessor.enhanceDocument(corrected) else corrected
+                        if (selectedFilter.isNotBlank() && selectedFilter != "None") {
+                            ImageProcessor.filter(enhanced, selectedFilter, filterParams) ?: enhanced
+                        } else enhanced
+                    }
+                }.onFailure { AppLogger.e("Scan", "Crop/filter failed for page ${page.id}", it) }.getOrNull()
+                if (result == null) {
+                    hasError = true
+                    continue
                 }
-            }.onFailure { AppLogger.e("Scan", "Perspective crop failed", it) }.getOrNull()
-            if (cropped == null) {
-                navFlow.value = navFlow.value.copy(
-                    busy = false,
-                    captureMessage = tr(settingsFlow.value, "Unable to process this photo. Please try again.", "无法处理此照片，请重试"),
+                val processedFile = File(page.originalPath).parentFile?.let { File(it, "${page.id}-processed.jpg") }
+                    ?: File(getApplication<Application>().filesDir, "${page.id}-processed.jpg")
+                withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(result, processedFile, 90) }
+                val updatedPage = page.copy(
+                    processedPath = processedFile.absolutePath,
+                    cropPoints = encodeCropPoints(pagePoints),
+                    rotation = normalizeQuarters(pageQuarters),
                 )
+                dao.upsertDraftPage(updatedPage)
+                processedPages += updatedPage
+            }
+            if (processedPages.isEmpty()) {
+                navFlow.value = navFlow.value.copy(busy = false, captureMessage = tr(settingsFlow.value, "Unable to process photos. Please try again.", "无法处理照片，请重试"))
                 return@launch
             }
             val state = navFlow.value
             val stack = if (state.backStack.lastOrNull() == Screen.Edit) state.backStack.dropLast(1) else state.backStack
-            AppLogger.i("Scan", "Perspective crop completed ${cropped.width}x${cropped.height}")
+            AppLogger.i("Scan", "Batch crop+filter completed for ${processedPages.size} pages")
             val currentDraft = state.draftPages.getOrNull(state.currentDraftIndex)
-            if (currentDraft != null) {
-                val processedFile = File(currentDraft.originalPath).parentFile?.let { File(it, "${currentDraft.id}-processed.jpg") }
-                    ?: File(getApplication<Application>().filesDir, "${currentDraft.id}-processed.jpg")
-                withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(cropped, processedFile, 90) }
-                val updatedDraft = currentDraft.copy(
-                    processedPath = processedFile.absolutePath,
-                    cropPoints = encodeCropPoints(points),
-                    rotation = normalizeQuarters(quarters),
-                )
-                dao.upsertDraftPage(updatedDraft)
-                val updatedPages = state.draftPages.toMutableList().also { it[state.currentDraftIndex] = updatedDraft }
-                navFlow.value = state.copy(
-                    screen = Screen.Edit,
-                    draftPages = updatedPages,
-                    processedBitmap = cropped,
-                    scanBitmap = cropped,
-                    scanSourcePath = null,
-                    cropPoints = defaultCropPoints(),
-                    autoCropPoints = emptyList(),
-                    detectionStatus = DocumentDetectionStatus.Idle,
-                    detectionConfidence = 0f,
-                    scanRotationQuarters = 0,
-                    busy = false,
-                )
-                return@launch
-            }
+            val firstProcessed = processedPages.firstOrNull()
             navFlow.value = state.copy(
                 screen = Screen.Edit,
-                backStack = stack,
-                processedBitmap = cropped,
-                scanBitmap = cropped,
+                draftPages = processedPages,
+                processedBitmap = firstProcessed?.let { ImageProcessor.readBitmap(it.processedPath, 1400) } ?: previewBitmap,
+                scanBitmap = firstProcessed?.let { ImageProcessor.readBitmap(it.processedPath, 1400) } ?: previewBitmap,
                 scanSourcePath = null,
                 cropPoints = defaultCropPoints(),
                 autoCropPoints = emptyList(),
                 detectionStatus = DocumentDetectionStatus.Idle,
                 detectionConfidence = 0f,
                 scanRotationQuarters = 0,
+                selectedFilter = selectedFilter,
+                editVersion = state.editVersion + 1,
                 busy = false,
+                captureMessage = if (hasError) tr(settingsFlow.value, "Some pages failed to process", "部分页面处理失败") else null,
             )
         }
     }
@@ -2396,8 +2415,8 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) model.importBitmap(uri, context)
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris != null) model.importBitmaps(uris, context)
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasCameraPermission = granted
@@ -2869,8 +2888,8 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CropToolButton(tr(settings, "Smart Crop", "智能裁切"), Icons.Default.AutoAwesome, selected = state.cropPreset == "Auto", dark = dark) { model.setCropPreset("Auto") }
-            CropToolButton(tr(settings, "Select All", "全选裁切"), Icons.Default.CropFree, selected = state.cropPreset == "Original", dark = dark) { model.setCropPreset("Original") }
+            CropToolButton(tr(settings, "Smart Crop", "智能裁切"), Icons.Default.AutoAwesome, dark = dark) { model.setCropPreset("Auto") }
+            CropToolButton(tr(settings, "Select All", "全选裁切"), Icons.Default.CropFree, dark = dark) { model.setCropPreset("Original") }
             CropToolButton(tr(settings, "Retake", "再拍一张"), Icons.Default.AddAPhoto, dark = dark) { model.retakePhoto() }
             CropToolButton(tr(settings, "Rotate Left", "左转"), Icons.Default.RotateLeft, dark = dark) { model.rotate(clockwise = false) }
             CropToolButton(tr(settings, "Rotate Right", "右转"), Icons.Default.RotateRight, dark = dark) { model.rotate(clockwise = true) }
@@ -2879,12 +2898,12 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
 }
 
 @Composable
-fun CropToolButton(label: String, icon: ImageVector, selected: Boolean = false, dark: Boolean = false, onClick: () -> Unit) {
-    val content = if (selected) ComposeColor.White else if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
+fun CropToolButton(label: String, icon: ImageVector, dark: Boolean = false, onClick: () -> Unit) {
+    val content = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
     Column(
         Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(if (selected) Teal else ComposeColor.Transparent)
+            .background(ComposeColor.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -2927,6 +2946,7 @@ fun CropEditor(
     var localPoints by remember { mutableStateOf(points) }
     var canvasSize by remember { mutableStateOf(Size(1f, 1f)) }
     var selectedHandle by remember { mutableStateOf(-1) }
+    var fineTuneDirection by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(points) {
         if (selectedHandle < 0 && points.size == 4 && localPoints.size == 4) {
             val start = localPoints
@@ -2955,15 +2975,18 @@ fun CropEditor(
                             }
                             .minByOrNull { it.second }
                         selectedHandle = if (nearest != null && nearest.second < 180f) nearest.first else -1
+                        fineTuneDirection = null
                     },
                     onDragEnd = {
                         val selected = selectedHandle
                         if (selected >= 0) onPointsChange(currentPoints)
                         selectedHandle = -1
+                        fineTuneDirection = null
                     },
                     onDragCancel = {
                         localPoints = points
                         selectedHandle = -1
+                        fineTuneDirection = null
                     },
                     onDrag = { change, drag ->
                         val selected = selectedHandle
@@ -3001,6 +3024,93 @@ fun CropEditor(
                 px.forEach {
                     drawCircle(ComposeColor.White, 25f, it)
                     drawCircle(Teal, 25f, it, style = Stroke(width = 5f))
+                }
+            }
+            if (selectedHandle >= 0 && canvasSize.width > 0 && canvasSize.height > 0) {
+                val handlePos = Offset(currentPoints[selectedHandle].x * canvasSize.width, currentPoints[selectedHandle].y * canvasSize.height)
+                val zoomSize = 120f
+                Box(
+                    Modifier
+                        .size(zoomSize, zoomSize)
+                        .offset(
+                            x = (handlePos.x - zoomSize / 2).coerceIn(0f, canvasSize.width - zoomSize),
+                            y = (handlePos.y - zoomSize / 2).coerceIn(0f, canvasSize.height - zoomSize),
+                        )
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(ComposeColor(0xCC1A1A1A))
+                        .border(2.dp, Teal, RoundedCornerShape(12.dp))
+                ) {
+                val zoomBitmap = rememberUpdatedState(
+                    if (selectedHandle >= 0 && canvasSize.width > 0 && canvasSize.height > 0) {
+                        val sx = (currentPoints[selectedHandle].x * bitmap.width * 0.5f).toInt().coerceIn(0, bitmap.width - 1)
+                        val sy = (currentPoints[selectedHandle].y * bitmap.height * 0.5f).toInt().coerceIn(0, bitmap.height - 1)
+                        val sw = minOf(60, bitmap.width - sx)
+                        val sh = minOf(60, bitmap.height - sy)
+                        if (sw > 0 && sh > 0) Bitmap.createBitmap(bitmap, sx, sy, sw, sh) else null
+                    } else null
+                ).value
+                zoomBitmap?.let {
+                    Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                }
+                    Canvas(Modifier.fillMaxSize()) {
+                        val cx = size.width / 2f
+                        val cy = size.height / 2f
+                        drawCircle(ComposeColor.White, 3f, Offset(cx, cy))
+                    }
+                }
+                Column(
+                    Modifier
+                        .offset(
+                            x = (handlePos.x + 40f).coerceIn(0f, canvasSize.width - 70f),
+                            y = (handlePos.y - 70f).coerceIn(0f, canvasSize.height - 70f),
+                        )
+                        .padding(4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    IconButton(onClick = {
+                        fineTuneDirection = "up"
+                        localPoints = localPoints.toMutableList().also { list ->
+                            val idx = selectedHandle
+                            list[idx] = Offset(list[idx].x, (list[idx].y - 0.01f).coerceIn(0f, 1f))
+                        }
+                        onPointsChange(localPoints)
+                    }) {
+                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(-90f))
+                    }
+                    Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = {
+                            fineTuneDirection = "left"
+                            localPoints = localPoints.toMutableList().also { list ->
+                                val idx = selectedHandle
+                                list[idx] = Offset((list[idx].x - 0.01f).coerceIn(0f, 1f), list[idx].y)
+                            }
+                            onPointsChange(localPoints)
+                        }) {
+                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(-180f))
+                        }
+                        Icon(Icons.Default.Search, null, tint = Teal, modifier = Modifier.size(24.dp))
+                        IconButton(onClick = {
+                            fineTuneDirection = "right"
+                            localPoints = localPoints.toMutableList().also { list ->
+                                val idx = selectedHandle
+                                list[idx] = Offset((list[idx].x + 0.01f).coerceIn(0f, 1f), list[idx].y)
+                            }
+                            onPointsChange(localPoints)
+                        }) {
+                            Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp))
+                        }
+                    }
+                    IconButton(onClick = {
+                        fineTuneDirection = "down"
+                        localPoints = localPoints.toMutableList().also { list ->
+                            val idx = selectedHandle
+                            list[idx] = Offset(list[idx].x, (list[idx].y + 0.01f).coerceIn(0f, 1f))
+                        }
+                        onPointsChange(localPoints)
+                    }) {
+                        Icon(Icons.Default.ArrowForwardIos, null, tint = ComposeColor.White, modifier = Modifier.size(24.dp).rotate(90f))
+                    }
                 }
             }
         }
