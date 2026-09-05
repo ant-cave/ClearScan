@@ -50,7 +50,7 @@ class DocumentEdgeDetectorInstrumentedTest {
     @Test
     fun allDocumentFiltersKeepPreviewDimensions() {
         val source = fixtureBitmap(listOf(Offset(.1f, .1f), Offset(.9f, .1f), Offset(.9f, .9f), Offset(.1f, .9f)))
-        listOf("Original", "Auto", "Clean", "White Paper", "B&W", "Ink", "Magic Color", "Photo", "Gray", "Soft Gray", "High Contrast").forEach { filter ->
+        listOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper").forEach { filter ->
             val output = ImageProcessor.filter(source, filter)
             assertEquals("width changed for $filter", source.width, output?.width)
             assertEquals("height changed for $filter", source.height, output?.height)

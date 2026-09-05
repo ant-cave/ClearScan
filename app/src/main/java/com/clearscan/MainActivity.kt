@@ -262,6 +262,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private val Teal = ComposeColor(0xFF0FA7A0)
 private val TealDark = ComposeColor(0xFF07847F)
@@ -2943,14 +2944,16 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
     val source = state.processedBitmap ?: state.scanBitmap
     val mainSource = remember(source) { ImageProcessor.previewBitmap(source, 1440) }
     val thumbSource = remember(source) { ImageProcessor.previewBitmap(source, 320) }
-    // OpenCV-accelerated filters (ant-cave) are listed first and B&W is the default.
-    val filters = remember { listOf("B&W", "Ink", "White Paper", "Original", "Auto", "Clean", "Magic Color", "Photo", "High Contrast", "Gray", "Soft Gray") }
+    // Only the ant-cave OpenCV-accelerated filters remain; the original author's filter
+    // presets were removed. The smart filters (division normalization, the pipeline behind
+    // classic scanner apps) lead the strip. B&W is the default.
+    val filters = remember { listOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper") }
     // Filters that expose user-tunable parameters below the strip.
-    val tunableFilters = remember { setOf("B&W", "Ink", "White Paper") }
+    val tunableFilters = remember { setOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper") }
     var selectedFilter by remember { mutableStateOf(state.selectedFilter) }
     var filterParams by remember { mutableStateOf(FilterParams()) }
     var mainPreview by remember(mainSource) { mutableStateOf(mainSource) }
-    var mainCache by remember(mainSource) { mutableStateOf(mapOf(filterCacheKey("Original", FilterParams()) to mainSource)) }
+    var mainCache by remember(mainSource) { mutableStateOf(mapOf<String, Bitmap?>()) }
     var thumbPreviews by remember(thumbSource) { mutableStateOf<Map<String, Bitmap?>>(emptyMap()) }
     LaunchedEffect(thumbSource) {
         thumbPreviews = withContext(Dispatchers.Default) {
@@ -2990,6 +2993,20 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
                     value = filterParams.paperLift,
                     range = .72f..1f,
                 ) { filterParams = filterParams.copy(paperLift = it) }
+                "Smart Gray", "Magic Color" -> {
+                    FilterAdjustment(
+                        label = tr(settings, "Enhance", "增强"),
+                        valueText = "%.0f%%".format(filterParams.smartStrength * 100),
+                        value = filterParams.smartStrength,
+                        range = 0f..1.3f,
+                    ) { filterParams = filterParams.copy(smartStrength = it) }
+                    FilterAdjustment(
+                        label = tr(settings, "Sharpen", "锐化"),
+                        valueText = "%.1fx".format(filterParams.sharpenScale),
+                        value = filterParams.sharpenScale,
+                        range = 0f..1.6f,
+                    ) { filterParams = filterParams.copy(sharpenScale = it) }
+                }
                 else -> {
                     FilterAdjustment(
                         label = tr(settings, "Threshold", "阈值"),
@@ -3024,7 +3041,7 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
 
 /** Cache key that folds the current filter parameters into the preview cache entry. */
 private fun filterCacheKey(filter: String, params: FilterParams): String =
-    "$filter|${params.threshold}|${params.sharpenScale}|${params.paperLift}|${params.denoise}"
+    "$filter|${params.threshold}|${params.sharpenScale}|${params.paperLift}|${params.denoise}|${params.smartStrength}"
 
 @Composable
 private fun FilterAdjustment(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
@@ -3036,17 +3053,11 @@ private fun FilterAdjustment(label: String, valueText: String, value: Float, ran
 }
 
 private fun filterLabel(settings: AppSettings, filter: String): String = when (filter) {
-    "Original" -> tr(settings, "Original", "原图")
-    "Auto" -> tr(settings, "Auto", "自动")
-    "Clean" -> tr(settings, "Clean", "净化")
+    "Smart Gray" -> tr(settings, "Smart Gray", "智能灰度")
+    "Magic Color" -> tr(settings, "Magic Color", "魔法彩色")
     "White Paper" -> tr(settings, "White Paper", "白纸")
     "B&W" -> tr(settings, "B&W", "黑白")
     "Ink" -> tr(settings, "Ink", "墨迹")
-    "Magic Color" -> tr(settings, "Magic Color", "魔法彩色")
-    "Photo" -> tr(settings, "Photo", "照片")
-    "Gray" -> tr(settings, "Gray", "灰度")
-    "Soft Gray" -> tr(settings, "Soft Gray", "柔和灰度")
-    "High Contrast" -> tr(settings, "High Contrast", "高对比")
     else -> filter
 }
 
@@ -4003,6 +4014,8 @@ data class FilterParams(
     val paperLift: Float = .88f,
     /** Median denoise kernel before B&W binarization: 1 = off, 3 = standard, 5 = aggressive (odd only). */
     val denoise: Int = 3,
+    /** Strength of the division-normalization "smart" filters (Smart Gray / Magic Color): 0 = original, 1 = full normalization. */
+    val smartStrength: Float = 1f,
 )
 
 object ImageProcessor {
@@ -4501,17 +4514,166 @@ object ImageProcessor {
     fun filter(bitmap: Bitmap?, filter: String, params: FilterParams = FilterParams()): Bitmap? {
         if (bitmap == null) return null
         return when (filter) {
+            "Smart Gray" -> smartEnhance(bitmap, params, color = false)
+            "Magic Color" -> smartEnhance(bitmap, params, color = true)
             "B&W" -> blackAndWhite(bitmap, params)
             "Ink" -> sharpen(blackAndWhite(bitmap, params), .35f * params.sharpenScale)
-            "Gray" -> adjust(grayWorldWhiteBalance(bitmap), 0f, 1.08f, 0f)
-            "Soft Gray" -> adjust(grayWorldWhiteBalance(bitmap), .025f, .98f, 0f)
-            "Clean" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), .02f, 1.10f, .96f) ?: bitmap, .48f * params.sharpenScale)
             "White Paper" -> whitePaper(bitmap, params)
-            "Magic Color" -> adjust(grayWorldWhiteBalance(bitmap), .04f, 1.22f, 1.22f)
-            "Photo" -> sharpen(adjust(bitmap, 0f, 1.04f, 1.08f) ?: bitmap, .28f * params.sharpenScale)
-            "High Contrast" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), 0f, 1.36f, .78f) ?: bitmap, .65f * params.sharpenScale)
-            "Auto" -> enhanceDocument(bitmap)
+            // Unknown names (e.g. legacy pages saved with removed presets) fall back to the original.
             else -> bitmap
+        }
+    }
+
+    /**
+     * Division-normalization enhancement, the pipeline behind classic scanner apps: a
+     * large-kernel Gaussian blur estimates the per-pixel background illumination, and
+     * dividing by it flattens uneven lighting, yellow paper, and soft shadows to a clean
+     * page while ink keeps its depth. Text is sparse and darker than its surroundings,
+     * so the background estimate at ink pixels stays close to paper white — the division
+     * therefore whitens paper but preserves strokes instead of thresholding them away.
+     *
+     * The grayscale variant additionally auto-locates black/white points from the
+     * histogram (0.4% / 99.6% percentiles) and stretches contrast before sharpening.
+     * The color variant normalizes each RGB channel independently (which also removes
+     * color casts) and then boosts saturation so stamps and charts stay vivid.
+     */
+    private fun smartEnhance(bitmap: Bitmap, params: FilterParams, color: Boolean): Bitmap {
+        smartEnhanceOpenCv(bitmap, params, color)?.let { return it }
+        return smartEnhanceFallback(bitmap, params, color)
+    }
+
+    /** Kernel radius for the background estimate: scales with image resolution (approx. r = sqrt(w*h)/32). */
+    private fun smartBackgroundRadius(width: Int, height: Int): Int {
+        val radius = (sqrt(width.toDouble() * height.toDouble()) / 32.0).roundToInt().coerceIn(9, 151)
+        return if (radius % 2 == 0) radius + 1 else radius
+    }
+
+    private fun smartEnhanceOpenCv(bitmap: Bitmap, params: FilterParams, color: Boolean): Bitmap? = withOpenCvMat(bitmap) { source ->
+        val background = Mat()
+        val white = Mat(source.size(), source.type(), Scalar(255.0, 255.0, 255.0, 255.0))
+        val denominator = Mat()
+        val normalized = Mat()
+        val gray = Mat()
+        val stretched = Mat()
+        val lut = MatOfByte()
+        val output = Mat()
+        try {
+            val radius = smartBackgroundRadius(source.cols(), source.rows())
+            Imgproc.GaussianBlur(source, background, CvSize(radius.toDouble(), radius.toDouble()), 0.0)
+            // Blend the background toward white by strength: 1 = full normalization, 0 = untouched.
+            // denominator = bg * s + 255 * (1 - s); normalized = source * 255 / denominator.
+            val strength = params.smartStrength.toDouble()
+            Core.addWeighted(background, strength, white, 1.0 - strength, 0.0, denominator)
+            Core.divide(source, denominator, normalized, 255.0)
+            if (color) {
+                // Saturation boost on top of per-channel normalization keeps stamps and charts vivid.
+                val saturated = adjust(matToBitmap(normalized) ?: return@withOpenCvMat null, .02f, 1.03f, 1.22f)
+                    ?: return@withOpenCvMat null
+                return@withOpenCvMat sharpen(saturated, .35f * params.sharpenScale)
+            }
+            Imgproc.cvtColor(normalized, gray, Imgproc.COLOR_RGBA2GRAY)
+            // Auto black/white points from the histogram: stretch between the 0.4% and 99.6% percentiles.
+            val grayBytes = ByteArray(gray.total().toInt())
+            gray.get(0, 0, grayBytes)
+            val bins = IntArray(256)
+            grayBytes.forEach { bins[it.toInt() and 0xFF]++ }
+            val totalPixels = grayBytes.size.toDouble()
+            var low = 0
+            var high = 255
+            var cumulative = 0.0
+            val lowTarget = totalPixels * .004
+            val highTarget = totalPixels * .996
+            for (index in 0 until 256) {
+                cumulative += bins[index]
+                if (cumulative >= lowTarget) { low = index; break }
+            }
+            cumulative = 0.0
+            for (index in 0 until 256) {
+                cumulative += bins[index]
+                if (cumulative >= highTarget) { high = index; break }
+            }
+            if (high - low < 24) { low = 0; high = 255 }
+            val span = (high - low).coerceAtLeast(1)
+            val table = ByteArray(256) { index ->
+                (((index - low) * 255) / span).coerceIn(0, 255).toByte()
+            }
+            lut.fromArray(*table)
+            Core.LUT(gray, lut, stretched)
+            Imgproc.cvtColor(stretched, output, Imgproc.COLOR_GRAY2RGBA)
+            matToBitmap(output)?.let { return@withOpenCvMat sharpen(it, .5f * params.sharpenScale) }
+        } finally {
+            listOf(background, white, denominator, normalized, gray, stretched, output).forEach(Mat::release)
+            lut.release()
+        }
+        null
+    }
+
+    private fun smartEnhanceFallback(bitmap: Bitmap, params: FilterParams, color: Boolean): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        // Downscale + upscale approximates the large-kernel Gaussian background estimate.
+        val factor = 16
+        val small = Bitmap.createScaledBitmap(bitmap, (width / factor).coerceAtLeast(1), (height / factor).coerceAtLeast(1), true)
+        val background = Bitmap.createScaledBitmap(small, width, height, true)
+        val pixels = IntArray(width * height)
+        val bgPixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        background.getPixels(bgPixels, 0, width, 0, 0, width, height)
+        val strength = params.smartStrength
+        fun divideChannel(value: Int, bgValue: Int): Int {
+            val denominator = bgValue * strength + 255f * (1f - strength)
+            return if (denominator < 1f) value else (value * 255f / denominator).roundToInt().coerceIn(0, 255)
+        }
+        val result = IntArray(width * height)
+        val grayHistogram = IntArray(256)
+        for (index in pixels.indices) {
+            val pixel = pixels[index]
+            val bg = bgPixels[index]
+            val r = divideChannel(Color.red(pixel), Color.red(bg))
+            val g = divideChannel(Color.green(pixel), Color.green(bg))
+            val b = divideChannel(Color.blue(pixel), Color.blue(bg))
+            result[index] = if (color) {
+                Color.rgb(r, g, b)
+            } else {
+                val gray = (r * 0.299f + g * 0.587f + b * 0.114f).roundToInt().coerceIn(0, 255)
+                grayHistogram[gray]++
+                Color.rgb(gray, gray, gray)
+            }
+        }
+        val normalized: Bitmap = if (color) {
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+                it.setPixels(result, 0, width, 0, 0, width, height)
+            }
+        } else {
+            // Same auto black/white stretch as the OpenCV path, computed from the gray histogram.
+            var low = 0
+            var high = 255
+            val total = result.size.toDouble()
+            var cumulative = 0.0
+            for (index in 0 until 256) {
+                cumulative += grayHistogram[index]
+                if (cumulative >= total * .004) { low = index; break }
+            }
+            cumulative = 0.0
+            for (index in 0 until 256) {
+                cumulative += grayHistogram[index]
+                if (cumulative >= total * .996) { high = index; break }
+            }
+            if (high - low >= 24) {
+                val span = high - low
+                for (index in result.indices) {
+                    val gray = (((Color.red(result[index]) - low) * 255) / span).coerceIn(0, 255)
+                    result[index] = Color.rgb(gray, gray, gray)
+                }
+            }
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+                it.setPixels(result, 0, width, 0, 0, width, height)
+            }
+        }
+        return if (color) {
+            sharpen(adjust(normalized, .02f, 1.03f, 1.22f) ?: normalized, .35f * params.sharpenScale)
+        } else {
+            sharpen(normalized, .5f * params.sharpenScale)
         }
     }
 

@@ -19,7 +19,7 @@ This is the ant-cave edition of ClearScan, maintained independently at [ant-cave
 | Capture | CameraX preview, real-time document boundary guidance, flash and lens controls, single-page and multi-page sessions |
 | Alignment | OpenCV edge detection, confidence-based fallback, four-corner manual adjustment, high-resolution perspective correction |
 | Editing | Rotation, brightness, contrast, saturation, document enhancement, high-quality cached filter previews |
-| Filters | Auto, Clean, White Paper, B&W, Ink, Magic Color, Photo, Gray, Soft Gray, and High Contrast — B&W/Ink use OpenCV adaptive thresholding, sharpen uses an OpenCV unsharp mask, and white balance uses OpenCV statistics, all dramatically faster than per-pixel loops |
+| Filters | Smart Gray and Magic Color (division normalization: per-pixel background estimate flattens uneven lighting and yellow paper while ink keeps its depth, with auto black/white stretch and saturation boost), plus B&W, Ink, and White Paper — all OpenCV-accelerated, with user-tunable threshold, sharpen, denoise, paper-lift, and enhance-strength parameters |
 | Documents | Local library, search, nested folders, rename, move, delete, share, print, and password protection |
 | PDF tools | Image to PDF, PDF to image, merge, split, compress, page-level editing, watermark, and signature overlays |
 | Codes | Bundled ML Kit QR and barcode recognition, safe URL opening, copy, and web search actions |

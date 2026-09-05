@@ -19,7 +19,7 @@ ClearScan 是使用 Kotlin 与 Jetpack Compose 构建的原生 Android 扫描应
 | 拍摄 | CameraX 预览、实时文档边界引导、闪光灯与镜头控制、单页和多页扫描 |
 | 校正 | OpenCV 边缘检测、置信度回退、四角手动调节、高分辨率透视校正 |
 | 编辑 | 旋转、亮度、对比度、饱和度、文档增强、高质量缓存滤镜预览 |
-| 滤镜 | Auto、Clean、White Paper、B&W、Ink、Magic Color、Photo、Gray、Soft Gray、High Contrast —— B&W/Ink 采用 OpenCV 自适应阈值，锐化采用 OpenCV unsharp mask，白平衡采用 OpenCV 统计计算，速度远快于逐像素处理 |
+| 滤镜 | 智能灰度、魔法彩色（除法归一化：逐像素背景估计抹平光照不均与黄纸，笔画层次保留，自动黑白点拉伸与饱和度增强）+ B&W、Ink、白纸 —— 全部 OpenCV 加速，支持阈值/锐化/降噪/纸张提亮/增强强度实时调节 |
 | 文档 | 本地文档库、搜索、多级文件夹、重命名、移动、删除、分享、打印、密码保护 |
 | PDF 工具 | 图片转 PDF、PDF 转图片、合并、拆分、压缩、页面级编辑、水印、签名叠加 |
 | 二维码 | 内置 ML Kit 二维码/条形码识别、安全打开链接、复制、网页搜索 |
