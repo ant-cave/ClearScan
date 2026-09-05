@@ -3003,6 +3003,18 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
                         value = filterParams.sharpenScale,
                         range = 0f..1.6f,
                     ) { filterParams = filterParams.copy(sharpenScale = it) }
+                    // Three discrete levels (off/standard/aggressive) mapped to median kernels 1/3/5.
+                    val denoiseLabel = when (filterParams.denoise) {
+                        1 -> tr(settings, "Off", "关")
+                        5 -> tr(settings, "Strong", "强")
+                        else -> tr(settings, "Standard", "标准")
+                    }
+                    FilterAdjustment(
+                        label = tr(settings, "Denoise", "降噪"),
+                        valueText = denoiseLabel,
+                        value = when (filterParams.denoise) { 1 -> 0f; 5 -> 2f; else -> 1f },
+                        range = 0f..2f,
+                    ) { filterParams = filterParams.copy(denoise = when (it.roundToInt()) { 0 -> 1; 2 -> 5; else -> 3 }) }
                 }
             }
             Spacer(Modifier.navigationBarsPadding())
@@ -3012,7 +3024,7 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
 
 /** Cache key that folds the current filter parameters into the preview cache entry. */
 private fun filterCacheKey(filter: String, params: FilterParams): String =
-    "$filter|${params.threshold}|${params.sharpenScale}|${params.paperLift}"
+    "$filter|${params.threshold}|${params.sharpenScale}|${params.paperLift}|${params.denoise}"
 
 @Composable
 private fun FilterAdjustment(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
@@ -3989,6 +4001,8 @@ data class FilterParams(
     val sharpenScale: Float = 1f,
     /** White Paper lift gamma: lower lifts shadows more (0.72..1.0). */
     val paperLift: Float = .88f,
+    /** Median denoise kernel before B&W binarization: 1 = off, 3 = standard, 5 = aggressive (odd only). */
+    val denoise: Int = 3,
 )
 
 object ImageProcessor {
@@ -4543,7 +4557,7 @@ object ImageProcessor {
 
     private fun blackAndWhite(bitmap: Bitmap, params: FilterParams): Bitmap {
         val balanced = grayWorldWhiteBalance(bitmap)
-        blackAndWhiteOpenCv(balanced, params.threshold)?.let { return sharpen(it, .6f * params.sharpenScale) }
+        blackAndWhiteOpenCv(balanced, params.threshold, params.denoise)?.let { return sharpen(it, .6f * params.sharpenScale) }
         return blackAndWhiteFallback(balanced, params)
     }
 
@@ -4552,9 +4566,10 @@ object ImageProcessor {
      * collapse into black blotches like a global threshold does. Block size follows the
      * image resolution; ink keeps the original near-black tone of 24. The bias controls
      * stroke weight: a higher value keeps strokes thinner and cleaner, a lower value
-     * picks up fainter strokes (at the cost of noise).
+     * picks up fainter strokes (at the cost of noise). A median pass before binarization
+     * removes isolated specks from paper grain without eating stroke edges.
      */
-    private fun blackAndWhiteOpenCv(bitmap: Bitmap, bias: Float): Bitmap? = withOpenCvMat(bitmap) { source ->
+    private fun blackAndWhiteOpenCv(bitmap: Bitmap, bias: Float, denoiseKernel: Int): Bitmap? = withOpenCvMat(bitmap) { source ->
         val gray = Mat()
         val binary = Mat()
         val remapped = Mat()
@@ -4563,6 +4578,8 @@ object ImageProcessor {
         val output = Mat()
         try {
             Imgproc.cvtColor(source, gray, Imgproc.COLOR_RGBA2GRAY)
+            // Kernel 1 is a no-op, so denoising can be turned off entirely.
+            if (denoiseKernel >= 3) Imgproc.medianBlur(gray, gray, if (denoiseKernel % 2 == 0) denoiseKernel + 1 else denoiseKernel)
             val requested = (min(gray.cols(), gray.rows()) / 16).coerceIn(25, 101)
             val blockSize = if (requested % 2 == 0) requested + 1 else requested
             Imgproc.adaptiveThreshold(gray, binary, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, blockSize, bias.toDouble())
