@@ -3604,7 +3604,7 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
                     Text(tr(state.settings, "Password", "密码"), fontSize = 12.sp)
                 }
                 TextButton(onClick = { moveOpen = true }) {
-                    Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Default.Folder, null, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(4.dp))
                     Text(tr(state.settings, "Move", "移动"), fontSize = 12.sp)
                 }
