@@ -534,7 +534,7 @@ data class UiState(
     val activeTool: String? = null,
     val selectedToolIds: Set<Long> = emptySet(),
     val toolOption: String = "Medium",
-    val cropPreset: String = "Original"
+    val cropPreset: String = "Original",
     val scanRotationQuarters: Int = 0,
     val selectedFilter: String = "B&W",
     val translationState: TranslationState = TranslationState(),
