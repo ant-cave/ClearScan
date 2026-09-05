@@ -49,13 +49,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.annotation.VisibleForTesting
-import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Camera
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.exifinterface.media.ExifInterface
@@ -109,6 +111,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Filter
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Close
@@ -452,6 +455,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Filter presets shown on the filter screen; also validates the persisted default filter. */
+val DocumentFilters = listOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper")
+
 data class AppSettings(
     val language: String = "Auto",
     val theme: String = "System",
@@ -460,12 +466,14 @@ data class AppSettings(
     val accountEmail: String = "",
     val passwordMap: Map<Long, String> = emptyMap(),
     val defaultSavePath: String = "Internal Storage",
+    val defaultFilter: String = "B&W",
     val autoCheckUpdates: Boolean = true,
     val autoDownloadUpdates: Boolean = true,
     val wifiOnlyUpdates: Boolean = true,
     val cameraGrid: Boolean = false,
     val cameraEnhance: Boolean = true,
-    val cameraResolution: String = "Balanced",
+    // "High" (CAPTURE_MODE_MAXIMIZE_QUALITY) is the default: full-sensor stills.
+    val cameraResolution: String = "High",
 )
 
 enum class Tab(val title: String, val icon: ImageVector) {
@@ -474,6 +482,15 @@ enum class Tab(val title: String, val icon: ImageVector) {
     Camera("Scan", Icons.Default.CameraAlt),
     Tools("Tools", Icons.Default.GridView),
     Me("Me", Icons.Default.AccountCircle),
+}
+
+/** Localized bottom-bar label; enum titles stay English as internal identifiers. */
+fun tabLabel(settings: AppSettings, tab: Tab): String = when (tab) {
+    Tab.Home -> tr(settings, "Home", "首页")
+    Tab.Docs -> tr(settings, "Docs", "文档")
+    Tab.Camera -> tr(settings, "Scan", "扫描")
+    Tab.Tools -> tr(settings, "Tools", "工具")
+    Tab.Me -> tr(settings, "Me", "我的")
 }
 
 enum class Screen {
@@ -573,6 +590,8 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         refreshTranslationModelState()
         viewModelScope.launch {
             settingsFlow.value = settingsRepository.load(settingsFlow.value)
+            // New sessions start with the user's default filter preselected on the filter screen.
+            navFlow.value = navFlow.value.copy(selectedFilter = settingsFlow.value.defaultFilter)
             val session = withContext(Dispatchers.IO) { dao.latestSession() }
             if (session != null) {
                 val pages = withContext(Dispatchers.IO) { dao.draftPages(session.id) }
@@ -817,7 +836,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     fun importBitmap(uri: Uri, context: Context) {
         viewModelScope.launch {
             val bitmap = withContext(Dispatchers.IO) {
-                ImageProcessor.decodeUriBitmap(context, uri, maxDimension = 2048)
+                ImageProcessor.decodeUriBitmap(context, uri, maxDimension = 4096)
             }
             if (bitmap == null) {
                 AppLogger.w("Scan", "Unable to decode imported image: $uri")
@@ -928,7 +947,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun openDraftPage(page: DraftScanPageEntity, index: Int) {
-        val bitmap = ImageProcessor.decodeCameraBitmap(page.originalPath, 2048) ?: return
+        val bitmap = ImageProcessor.decodeCameraBitmap(page.originalPath, 2560) ?: return
         val corners = decodeCropPoints(page.cropPoints)
         val update: UiState.() -> UiState = {
             copy(
@@ -1037,7 +1056,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             val cropped = runCatching {
                 withContext(Dispatchers.Default) {
                     val workingBitmap = sourcePath
-                        ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 3072) }
+                        ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 4096) }
                         ?: previewBitmap
                     val corrected = DocumentPerspectiveCorrector.crop(workingBitmap, points)
                     if (settingsFlow.value.cameraEnhance) ImageProcessor.enhanceDocument(corrected) else corrected
@@ -1806,12 +1825,14 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             accountEmail = prefs.getString("accountEmail", "") ?: "",
             passwordMap = passwords,
             defaultSavePath = prefs.getString("defaultSavePath", "Internal Storage") ?: "Internal Storage",
+            // Sanitize: a stored default may name a filter that no longer exists.
+            defaultFilter = (prefs.getString("defaultFilter", "B&W") ?: "B&W").takeIf { it in DocumentFilters } ?: "B&W",
             autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
             autoDownloadUpdates = prefs.getBoolean("autoDownloadUpdates", true),
             wifiOnlyUpdates = prefs.getBoolean("wifiOnlyUpdates", true),
             cameraGrid = prefs.getBoolean("cameraGrid", false),
             cameraEnhance = prefs.getBoolean("cameraEnhance", true),
-            cameraResolution = prefs.getString("cameraResolution", "Balanced") ?: "Balanced",
+            cameraResolution = prefs.getString("cameraResolution", "High") ?: "High",
         )
     }
 
@@ -1823,6 +1844,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             .putString("accountName", settings.accountName)
             .putString("accountEmail", settings.accountEmail)
             .putString("defaultSavePath", settings.defaultSavePath)
+            .putString("defaultFilter", settings.defaultFilter)
             .putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
             .putBoolean("autoDownloadUpdates", settings.autoDownloadUpdates)
             .putBoolean("wifiOnlyUpdates", settings.wifiOnlyUpdates)
@@ -1943,7 +1965,7 @@ fun EdgeSwipeBackBox(onBack: () -> Unit, content: @Composable () -> Unit) {
 @Composable
 fun ShellScreen(state: UiState, model: ClearScanViewModel) {
     Scaffold(
-        bottomBar = { BottomNav(state.tab, model::selectTab, model::openCamera) },
+        bottomBar = { BottomNav(state.settings, state.tab, model::selectTab, model::openCamera) },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
@@ -1959,7 +1981,7 @@ fun ShellScreen(state: UiState, model: ClearScanViewModel) {
 }
 
 @Composable
-fun BottomNav(current: Tab, onTab: (Tab) -> Unit, onCamera: () -> Unit) {
+fun BottomNav(settings: AppSettings, current: Tab, onTab: (Tab) -> Unit, onCamera: () -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -1976,9 +1998,9 @@ fun BottomNav(current: Tab, onTab: (Tab) -> Unit, onCamera: () -> Unit) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            listOf(Tab.Home, Tab.Docs).forEach { NavItem(it, current == it) { onTab(it) } }
+            listOf(Tab.Home, Tab.Docs).forEach { NavItem(settings, it, current == it) { onTab(it) } }
             Spacer(Modifier.width(72.dp))
-            listOf(Tab.Tools, Tab.Me).forEach { NavItem(it, current == it) { onTab(it) } }
+            listOf(Tab.Tools, Tab.Me).forEach { NavItem(settings, it, current == it) { onTab(it) } }
         }
         Box(
             Modifier
@@ -1995,14 +2017,15 @@ fun BottomNav(current: Tab, onTab: (Tab) -> Unit, onCamera: () -> Unit) {
 }
 
 @Composable
-fun NavItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
+fun NavItem(settings: AppSettings, tab: Tab, selected: Boolean, onClick: () -> Unit) {
+    val label = tabLabel(settings, tab)
     Column(
         Modifier.width(56.dp).clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(tab.icon, tab.title, tint = if (selected) Teal else Muted, modifier = Modifier.size(27.dp))
-        Text(tab.title, color = if (selected) Teal else Muted, fontSize = 12.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
+        Icon(tab.icon, label, tint = if (selected) Teal else Muted, modifier = Modifier.size(27.dp))
+        Text(label, color = if (selected) Teal else Muted, fontSize = 12.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
     }
 }
 
@@ -2011,35 +2034,35 @@ fun HomeScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 22.dp, bottom = 112.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 112.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("ClearScan", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
-                IconButton(onClick = model::openSettings) { Icon(Icons.Default.Settings, null, modifier = Modifier.size(30.dp)) }
+                Text("ClearScan", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+                IconButton(onClick = model::openSettings) { Icon(Icons.Default.Settings, null, modifier = Modifier.size(28.dp)) }
             }
         }
         item { HeroCard(settings) }
         if (state.draftPages.isNotEmpty()) item {
-            OutlinedButton(model::resumeScanSession, Modifier.fillMaxWidth().height(54.dp)) {
+            OutlinedButton(model::resumeScanSession, Modifier.fillMaxWidth().height(48.dp)) {
                 Text(tr(settings, "Resume ${state.draftPages.size}-page scan", "继续 ${state.draftPages.size} 页扫描"), fontWeight = FontWeight.Bold)
             }
         }
         item {
             Button(
                 onClick = model::openCamera,
-                modifier = Modifier.fillMaxWidth().height(76.dp),
+                modifier = Modifier.fillMaxWidth().height(56.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Teal),
                 shape = RoundedCornerShape(12.dp),
             ) {
-                Icon(Icons.Default.CameraAlt, null, Modifier.size(30.dp))
-                Spacer(Modifier.width(16.dp))
-                Text(tr(settings, "Scan Document", "扫描文档"), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Default.CameraAlt, null, Modifier.size(26.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(tr(settings, "Scan Document", "扫描文档"), fontSize = 19.sp, fontWeight = FontWeight.Bold)
             }
         }
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 QuickAction(tr(settings, "Import Images", "导入图片"), Icons.Default.Image, Modifier.weight(1f)) { model.openCamera() }
                 QuickAction(tr(settings, "ID Card Scan", "证件扫描"), Icons.Outlined.Badge, Modifier.weight(1f)) { model.startScanMode(ScanMode.IdCard) }
             }
@@ -2060,14 +2083,14 @@ fun HomeScreen(state: UiState, model: ClearScanViewModel) {
 fun HeroCard(settings: AppSettings) {
     val dark = isDarkTheme(settings)
     Card(
-        Modifier.fillMaxWidth().height(190.dp),
+        Modifier.fillMaxWidth().height(150.dp),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = if (dark) ComposeColor(0xFF162321) else ComposeColor(0xFFE9FAF7)),
         elevation = CardDefaults.cardElevation(0.dp),
     ) {
-        Row(Modifier.fillMaxSize().padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(tr(settings, "Go Paperless,\nBe Productive.", "告别纸张，\n高效办公。"), Modifier.weight(1f), fontSize = 26.sp, lineHeight = 34.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
-            ScannerIllustration(Modifier.size(130.dp), dark)
+        Row(Modifier.fillMaxSize().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(tr(settings, "Go Paperless,\nBe Productive.", "告别纸张，\n高效办公。"), Modifier.weight(1f), fontSize = 23.sp, lineHeight = 31.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
+            ScannerIllustration(Modifier.size(110.dp), dark)
         }
     }
 }
@@ -2156,8 +2179,8 @@ fun DocsScreen(state: UiState, model: ClearScanViewModel) {
     val childFolders = state.folders.filter { it.parentId == state.currentFolderId }
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 20.dp, bottom = 122.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 122.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -2258,8 +2281,14 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     val context = LocalContext.current
     val settings = state.settings
     val imageCapture = remember(settings.cameraResolution) {
+        // 4:3 matches the native sensor mode on most devices, which keeps the full
+        // sensor width in play; capture mode decides between full-resolution stills
+        // (High/MAXIMIZE_QUALITY) and low-latency preview-matched stills (Balanced).
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .build()
         ImageCapture.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setResolutionSelector(resolutionSelector)
             .setCaptureMode(if (settings.cameraResolution == "High") ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
@@ -2487,9 +2516,7 @@ fun CameraPreview(
             cameraProviderFuture.addListener({
                 runCatching {
                     val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder()
-                        .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                        .build()
+                    val preview = Preview.Builder().build()
                         .also {
                             it.surfaceProvider = previewView.surfaceProvider
                         }
@@ -2498,8 +2525,13 @@ fun CameraPreview(
                     val useCases = mutableListOf<androidx.camera.core.UseCase>(preview, imageCapture)
                     var analysis: ImageAnalysis? = null
                     if (analyzer != null) {
+                        // 720p analysis: enough detail for the edge detector's 720-long-side
+                        // pipeline without starving the preview or capture frame rate.
+                        val analysisSelector = ResolutionSelector.Builder()
+                            .setResolutionStrategy(ResolutionStrategy(android.util.Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                            .build()
                         analysis = ImageAnalysis.Builder()
-                            .setTargetResolution(android.util.Size(640, 480))
+                            .setResolutionSelector(analysisSelector)
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
                         analysis.setAnalyzer(analysisExecutor, analyzer)
@@ -2643,7 +2675,7 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
     val dark = isDarkTheme(settings)
     Column(Modifier.fillMaxSize().background(if (dark) ComposeColor(0xFF111317) else MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Crop", "裁剪"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::applyCropAndEdit, dark = dark)
-        Box(Modifier.weight(1f).fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp), contentAlignment = Alignment.Center) {
             CropEditor(
                 bitmap = state.processedBitmap ?: state.scanBitmap,
                 points = state.cropPoints,
@@ -2734,7 +2766,7 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                 TextButton(onClick = { model.deleteCurrentDraft(true) }) { Text(tr(settings, "Retake", "重新拍摄")) }
             }
         }
-        LazyRow(Modifier.fillMaxWidth().padding(18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyRow(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(listOf("Auto", "Original", "A4", "Letter", "Legal", "More")) { label ->
                 val selected = state.cropPreset == label
                 val display = when (label) {
@@ -2883,7 +2915,7 @@ fun EditScreen(state: UiState, model: ClearScanViewModel) {
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 28.dp, vertical = 18.dp)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
                 .pointerInput(Unit) {
                     detectTransformGestures { _, panChange, zoomChange, _ ->
                         previewZoom = (previewZoom * zoomChange).coerceIn(1f, 4f)
@@ -2946,8 +2978,9 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
     val thumbSource = remember(source) { ImageProcessor.previewBitmap(source, 320) }
     // Only the ant-cave OpenCV-accelerated filters remain; the original author's filter
     // presets were removed. The smart filters (division normalization, the pipeline behind
-    // classic scanner apps) lead the strip. B&W is the default.
-    val filters = remember { listOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper") }
+    // classic scanner apps) lead the strip. The initial selection comes from the
+    // user-configurable default filter setting.
+    val filters = remember { DocumentFilters }
     // Filters that expose user-tunable parameters below the strip.
     val tunableFilters = remember { setOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper") }
     var selectedFilter by remember { mutableStateOf(state.selectedFilter) }
@@ -2971,16 +3004,16 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Filter", "滤镜"), onBack = model::back, action = tr(settings, "Apply", "应用"), onAction = { model.applyFilter(selectedFilter, filterParams) })
-        Box(Modifier.weight(1f).fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp), contentAlignment = Alignment.Center) {
             ScanBitmap(mainPreview ?: state.processedBitmap ?: state.scanBitmap, Modifier.fillMaxWidth().aspectRatio(.72f))
         }
-        LazyRow(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        LazyRow(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(filters) { filter ->
                 val selected = filter == selectedFilter
                 val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
-                Column(Modifier.width(92.dp).clickable { selectedFilter = filter }, horizontalAlignment = Alignment.CenterHorizontally) {
-                    ScanBitmap(thumbPreviews[filter], Modifier.size(84.dp, 108.dp))
-                    Spacer(Modifier.height(8.dp))
+                Column(Modifier.width(84.dp).clickable { selectedFilter = filter }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp))
+                    Spacer(Modifier.height(6.dp))
                     Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
                 }
             }
@@ -3045,10 +3078,10 @@ private fun filterCacheKey(filter: String, params: FilterParams): String =
 
 @Composable
 private fun FilterAdjustment(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.width(96.dp), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(88.dp), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
         Slider(value = value, onValueChange = onChange, valueRange = range, modifier = Modifier.weight(1f))
-        Text(valueText, Modifier.width(44.dp), fontSize = 12.sp, color = Muted, textAlign = TextAlign.End)
+        Text(valueText, Modifier.width(48.dp), fontSize = 12.sp, color = Muted, textAlign = TextAlign.End)
     }
 }
 
@@ -3059,6 +3092,21 @@ private fun filterLabel(settings: AppSettings, filter: String): String = when (f
     "B&W" -> tr(settings, "B&W", "黑白")
     "Ink" -> tr(settings, "Ink", "墨迹")
     else -> filter
+}
+
+/** Localized display label for persisted image-quality values (identifiers stay English). */
+fun qualityLabel(settings: AppSettings, quality: String): String = when (quality) {
+    "High" -> tr(settings, "High", "高")
+    "Medium" -> tr(settings, "Medium", "中")
+    "Low" -> tr(settings, "Low", "低")
+    else -> quality
+}
+
+/** Localized display label for persisted save-path values. */
+fun savePathLabel(settings: AppSettings, path: String): String = when (path) {
+    "Internal Storage" -> tr(settings, "Internal Storage", "内部存储")
+    "Documents" -> tr(settings, "Documents", "文档目录")
+    else -> path
 }
 
 @Composable
@@ -3078,7 +3126,7 @@ fun AdjustScreen(state: UiState, model: ClearScanViewModel) {
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Adjust", "调节"), onBack = model::back, action = tr(settings, "Apply", "应用"), onAction = { model.applyAdjust(brightness, contrast, saturation) })
-        Box(Modifier.fillMaxWidth().height(430.dp).padding(36.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxWidth().height(430.dp).padding(14.dp), contentAlignment = Alignment.Center) {
             ScanBitmap(adjustedPreview, Modifier.fillMaxHeight().aspectRatio(.72f))
         }
         Adjustment(tr(settings, "Brightness", "亮度"), brightness, -0.4f..0.4f) { brightness = it }
@@ -3095,8 +3143,8 @@ fun AdjustScreen(state: UiState, model: ClearScanViewModel) {
 
 @Composable
 fun Adjustment(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.width(124.dp), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(104.dp), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Slider(value = value, onValueChange = onChange, valueRange = range, modifier = Modifier.weight(1f))
     }
 }
@@ -3112,19 +3160,19 @@ fun SaveScreen(state: UiState, model: ClearScanViewModel) {
         Box(Modifier.fillMaxWidth().height(280.dp), contentAlignment = Alignment.Center) {
             ScanBitmap(state.processedBitmap ?: state.scanBitmap, Modifier.width(150.dp).aspectRatio(.72f))
         }
-        Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text(tr(settings, "Title", "标题"), color = Muted, fontSize = 18.sp)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(tr(settings, "Title", "标题"), color = Muted, fontSize = 16.sp)
             OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), singleLine = true)
             SelectField(tr(settings, "File Type", "文件类型"), type, listOf("PDF", "JPG")) { type = it }
-            SelectField(tr(settings, "Image Quality", "图片质量"), quality, listOf("High", "Medium", "Low")) { quality = it }
-            Button(onClick = { model.saveDocument(title, type, quality) }, modifier = Modifier.fillMaxWidth().height(64.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(12.dp)) {
+            SelectField(tr(settings, "Image Quality", "图片质量"), quality, listOf("High", "Medium", "Low"), displayValue = { qualityLabel(settings, it) }) { quality = it }
+            Button(onClick = { model.saveDocument(title, type, quality) }, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(12.dp)) {
                 Icon(Icons.Default.Save, null)
                 Spacer(Modifier.width(12.dp))
                 Text(if (state.busy) tr(settings, "Saving...", "保存中...") else tr(settings, "Save", "保存"), fontSize = 18.sp)
             }
             Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(tr(settings, "Save to", "保存到"), color = Muted, fontSize = 17.sp)
-                Text("${state.settings.defaultSavePath}  ›", color = Muted, fontSize = 17.sp)
+                Text("${savePathLabel(settings, state.settings.defaultSavePath)}  ›", color = Muted, fontSize = 17.sp)
             }
         }
     }
@@ -3594,12 +3642,13 @@ fun MeScreen(state: UiState, model: ClearScanViewModel) {
 fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean = false) {
     val settings = state.settings
     var activeDialog by remember { mutableStateOf<String?>(null) }
-    LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = if (embedded) 24.dp else 12.dp, bottom = 122.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = if (embedded) 24.dp else 12.dp, bottom = 122.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { TopTitle(tr(settings, "Settings", "设置"), if (embedded) null else model::back) }
         item { SettingRow(label = tr(settings, "My Account", "我的账号"), icon = Icons.Default.AccountCircle, value = if (settings.loggedIn) settings.accountName else tr(settings, "Sign in", "登录"), onClick = model::openAccount) }
         item { SettingRow(label = tr(settings, "Language", "语言"), icon = Icons.Default.Language, value = if (settings.language == "Auto") tr(settings, "Auto (system)", "跟随系统") else settings.language, onClick = { activeDialog = "language" }) }
         item { SettingRow(label = tr(settings, "Theme", "主题"), icon = Icons.Default.Brightness6, value = when (settings.theme) { "System" -> tr(settings, "Follow system", "跟随系统"); "Dark" -> tr(settings, "Dark", "夜间"); else -> tr(settings, "Light", "日间") }, onClick = { activeDialog = "theme" }) }
         item { SettingRow(label = tr(settings, "Default Save Path", "默认保存路径"), icon = Icons.Default.Folder, value = settings.defaultSavePath, onClick = { activeDialog = "path" }) }
+        item { SettingRow(label = tr(settings, "Default Filter", "默认滤镜"), icon = Icons.Default.Filter, value = filterLabel(settings, settings.defaultFilter), onClick = { activeDialog = "filter" }) }
         item { SettingRow(label = tr(settings, "Password Lock", "文件密码锁"), icon = Icons.Default.Lock, value = tr(settings, "${settings.passwordMap.size} protected", "已保护 ${settings.passwordMap.size} 个文件"), onClick = { activeDialog = "password" }) }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(8.dp)) {
@@ -3629,7 +3678,7 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         item { SettingRow(label = tr(settings, "Help & Feedback", "帮助与反馈"), icon = Icons.Default.Info, onClick = model::openHelp) }
         item { SettingRow(label = tr(settings, "About ClearScan", "关于 ClearScan"), icon = Icons.Default.Info, value = "v${BuildConfig.VERSION_NAME}", onClick = model::openAbout) }
         item {
-            OutlinedButton(onClick = model::logout, modifier = Modifier.fillMaxWidth().height(64.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = ComposeColor(0xFFE53935)), shape = RoundedCornerShape(9.dp)) {
+            OutlinedButton(onClick = model::logout, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = ComposeColor(0xFFE53935)), shape = RoundedCornerShape(9.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Logout, null)
                 Spacer(Modifier.width(10.dp))
                 Text(tr(settings, "Log Out", "退出登录"), fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -3658,6 +3707,14 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         selected = settings.defaultSavePath,
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(defaultSavePath = it)); activeDialog = null },
+    )
+    if (activeDialog == "filter") ChoiceDialog(settings,
+        title = tr(settings, "Default Filter", "默认滤镜"),
+        options = DocumentFilters,
+        selected = settings.defaultFilter,
+        label = { option -> filterLabel(settings, option) },
+        onDismiss = { activeDialog = null },
+        onSelect = { model.updateSettings(settings.copy(defaultFilter = it)); activeDialog = null },
     )
     if (activeDialog == "password") PasswordManagerDialog(state, model, onDismiss = { activeDialog = null })
 }
@@ -3889,48 +3946,48 @@ fun AppLogsScreen(state: UiState, model: ClearScanViewModel) {
 
 @Composable
 fun TopBar(title: String, onBack: () -> Unit, action: String? = null, onAction: (() -> Unit)? = null, dark: Boolean = false) {
-    Row(Modifier.fillMaxWidth().height(74.dp).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface) }
-        Text(title, Modifier.weight(1f), textAlign = TextAlign.Center, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface)
-        TextButton(onClick = { onAction?.invoke() }, enabled = action != null) { Text(action ?: "", color = Teal, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+        Text(title, Modifier.weight(1f), textAlign = TextAlign.Center, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface)
+        TextButton(onClick = { onAction?.invoke() }, enabled = action != null) { Text(action ?: "", color = Teal, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
     }
 }
 
 @Composable
 fun TopTitle(title: String, onBack: (() -> Unit)?) {
-    Row(Modifier.fillMaxWidth().height(64.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
         if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onSurface) } else Spacer(Modifier.width(8.dp))
-        Text(title, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
+        Text(title, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
 @Composable
 fun OptionRow(label: String, icon: ImageVector, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().height(74.dp).clickable(onClick = onClick).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, label, tint = Teal, modifier = Modifier.size(30.dp))
-        Spacer(Modifier.width(22.dp))
-        Text(label, Modifier.weight(1f), fontSize = 20.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-        Icon(Icons.Default.ArrowForwardIos, null, tint = Muted, modifier = Modifier.size(20.dp))
+    Row(Modifier.fillMaxWidth().height(60.dp).clickable(onClick = onClick).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, label, tint = Teal, modifier = Modifier.size(26.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, Modifier.weight(1f), fontSize = 18.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+        Icon(Icons.Default.ArrowForwardIos, null, tint = Muted, modifier = Modifier.size(18.dp))
     }
 }
 
 @Composable
 fun SettingRow(label: String, icon: ImageVector, value: String? = null, onClick: () -> Unit = {}, trailing: (@Composable () -> Unit)? = null) {
-    Row(Modifier.fillMaxWidth().height(74.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, ComposeColor(0xFFECEFF2), RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, label, tint = Teal, modifier = Modifier.size(31.dp))
-        Spacer(Modifier.width(22.dp))
-        Text(label, Modifier.weight(1f), fontSize = 20.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+    Row(Modifier.fillMaxWidth().height(60.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, ComposeColor(0xFFECEFF2), RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, label, tint = Teal, modifier = Modifier.size(26.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
         if (trailing != null) trailing() else {
-            if (value != null) Text(value, color = Muted, fontSize = 15.sp)
+            if (value != null) Text(value, color = Muted, fontSize = 14.sp)
             Spacer(Modifier.width(8.dp))
-            Icon(Icons.Default.ArrowForwardIos, null, tint = Muted, modifier = Modifier.size(18.dp))
+            Icon(Icons.Default.ArrowForwardIos, null, tint = Muted, modifier = Modifier.size(16.dp))
         }
     }
 }
 
 @Composable
 fun EmptyState(title: String, body: String) {
-    Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(Icons.Default.DocumentScanner, null, tint = Muted, modifier = Modifier.size(48.dp))
         Text(title, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
         Text(body, color = Muted, textAlign = TextAlign.Center)
@@ -4130,18 +4187,18 @@ object ImageProcessor {
     fun optimizeCapturedPhoto(
         input: File,
         output: File,
-        maxDimension: Int = 3072,
-        targetBytes: Long = 4_500_000L,
+        maxDimension: Int = 4096,
+        targetBytes: Long = 8_000_000L,
     ): File? = runCatching {
         val decoded = decodeCameraBitmap(input.absolutePath, maxDimension) ?: return@runCatching null
         var encoded = decoded
-        for (quality in listOf(88, 82, 76)) {
+        for (quality in listOf(92, 86, 80)) {
             writeJpeg(encoded, output, quality)
             if (output.length() <= targetBytes) break
         }
-        if (output.length() > targetBytes && maxOf(decoded.width, decoded.height) > 2400) {
-            encoded = previewBitmap(decoded, 2400) ?: decoded
-            writeJpeg(encoded, output, 80)
+        if (output.length() > targetBytes && maxOf(decoded.width, decoded.height) > 3200) {
+            encoded = previewBitmap(decoded, 3200) ?: decoded
+            writeJpeg(encoded, output, 84)
         }
         if (!output.exists() || output.length() <= 0L) return@runCatching null
         val originalBytes = input.length()

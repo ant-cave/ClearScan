@@ -22,6 +22,7 @@ class SettingsRepository(private val context: Context) {
         val accountEmail = stringPreferencesKey("accountEmail")
         val passwords = stringPreferencesKey("passwords")
         val defaultSavePath = stringPreferencesKey("defaultSavePath")
+        val defaultFilter = stringPreferencesKey("defaultFilter")
         val autoCheckUpdates = booleanPreferencesKey("autoCheckUpdates")
         val autoDownloadUpdates = booleanPreferencesKey("autoDownloadUpdates")
         val wifiOnlyUpdates = booleanPreferencesKey("wifiOnlyUpdates")
@@ -44,6 +45,7 @@ class SettingsRepository(private val context: Context) {
             accountEmail = values[Keys.accountEmail] ?: fallback.accountEmail,
             passwordMap = passwords.ifEmpty { fallback.passwordMap },
             defaultSavePath = values[Keys.defaultSavePath] ?: fallback.defaultSavePath,
+            defaultFilter = (values[Keys.defaultFilter] ?: fallback.defaultFilter).takeIf { it in DocumentFilters } ?: "B&W",
             autoCheckUpdates = values[Keys.autoCheckUpdates] ?: fallback.autoCheckUpdates,
             autoDownloadUpdates = values[Keys.autoDownloadUpdates] ?: fallback.autoDownloadUpdates,
             wifiOnlyUpdates = values[Keys.wifiOnlyUpdates] ?: fallback.wifiOnlyUpdates,
@@ -62,6 +64,7 @@ class SettingsRepository(private val context: Context) {
             values[Keys.accountEmail] = settings.accountEmail
             values[Keys.passwords] = settings.passwordMap.entries.joinToString("|") { "${it.key}:${it.value}" }
             values[Keys.defaultSavePath] = settings.defaultSavePath
+            values[Keys.defaultFilter] = settings.defaultFilter
             values[Keys.autoCheckUpdates] = settings.autoCheckUpdates
             values[Keys.autoDownloadUpdates] = settings.autoDownloadUpdates
             values[Keys.wifiOnlyUpdates] = settings.wifiOnlyUpdates

@@ -62,8 +62,9 @@ data class DocumentDetectionResult(
 
 object DocumentEdgeDetector {
     private const val ANALYSIS_LONG_SIDE = 1280.0
-    private const val MIN_AREA_RATIO = 0.10
-    private const val MIN_CONFIDENCE = 0.54f
+    private const val PREVIEW_LONG_SIDE = 720.0
+    private const val MIN_AREA_RATIO = 0.06
+    private const val MIN_CONFIDENCE = 0.50f
 
     /** Loads the bundled OpenCV runtime once; safe to call from any image-processing path. */
     val openCvAvailable: Boolean get() = OpenCvRuntime.loaded
@@ -74,6 +75,7 @@ object DocumentEdgeDetector {
         val source = Mat()
         val scaled = Mat()
         val gray = Mat()
+        val equalized = Mat()
         val blurred = Mat()
         val edges = Mat()
         val adaptive = Mat()
@@ -84,13 +86,19 @@ object DocumentEdgeDetector {
         val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
         return try {
             Utils.bitmapToMat(bitmap, source)
-            val scale = min(1.0, 640.0 / max(source.cols(), source.rows()).toDouble())
+            val scale = min(1.0, PREVIEW_LONG_SIDE / max(source.cols(), source.rows()).toDouble())
             Imgproc.resize(source, scaled, Size(source.cols() * scale, source.rows() * scale), 0.0, 0.0, Imgproc.INTER_AREA)
             Imgproc.cvtColor(scaled, gray, Imgproc.COLOR_RGBA2GRAY)
-            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-            val median = averageLuminance(blurred)
-            Imgproc.Canny(blurred, edges, max(20.0, median * .48), min(235.0, median * 1.45), 3, true)
-            Imgproc.adaptiveThreshold(blurred, adaptive, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV, 31, 7.0)
+            // CLAHE first: preview detection previously coupled Canny thresholds to raw frame
+            // luminance, so dim rooms and hard shadows produced either noise or no edges at
+            // all. Contrast-limited equalization keeps the thresholds below stable across
+            // lighting, which is the single biggest win for detection rate.
+            val clahe = Imgproc.createCLAHE(2.0, Size(8.0, 8.0))
+            clahe.apply(gray, equalized)
+            clahe.collectGarbage()
+            Imgproc.GaussianBlur(equalized, blurred, Size(5.0, 5.0), 0.0)
+            Imgproc.Canny(blurred, edges, 50.0, 150.0, 3, true)
+            Imgproc.adaptiveThreshold(blurred, adaptive, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY_INV, 41, 10.0)
             Core.bitwise_or(edges, adaptive, combined)
             Imgproc.morphologyEx(combined, closed, Imgproc.MORPH_CLOSE, kernel, Point(-1.0, -1.0), 2)
             Imgproc.findContours(closed, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
@@ -109,7 +117,7 @@ object DocumentEdgeDetector {
             failed(started, error.message ?: error.javaClass.simpleName)
         } finally {
             contours.forEach(MatOfPoint::release)
-            listOf(source, scaled, gray, blurred, edges, adaptive, combined, closed, hierarchy, kernel).forEach(Mat::release)
+            listOf(source, scaled, gray, equalized, blurred, edges, adaptive, combined, closed, hierarchy, kernel).forEach(Mat::release)
         }
     }
 
@@ -169,9 +177,12 @@ object DocumentEdgeDetector {
             }
             analysisPlanes.forEach { plane ->
                 Imgproc.GaussianBlur(plane, blurred, Size(5.0, 5.0), 0.0)
+                // Clamped median-relative thresholds: the old formula tracked raw luminance,
+                // so bright scenes pushed the high threshold past weak paper-background edges
+                // and dark scenes collapsed into noise. The clamps keep the ratio bounded.
                 val luminance = averageLuminance(blurred)
-                val low = max(18.0, luminance * 0.55)
-                val high = min(245.0, max(low + 30.0, luminance * 1.35))
+                val low = (luminance * .45).coerceIn(20.0, 65.0)
+                val high = max(low * 2.2, (luminance * 1.15).coerceAtMost(180.0))
                 Imgproc.Canny(blurred, edges, low, high, 3, true)
                 collectCandidates(edges)
             }
@@ -255,9 +266,12 @@ object DocumentEdgeDetector {
         val centerY = ordered.sumOf { it.y } / 4.0
         val centerDistance = hypot(centerX / width - .5, centerY / height - .5) / .707
         val centerScore = (1.0 - centerDistance).coerceIn(0.0, 1.0)
+        // Slight penalty for quads hugging the image border (usually the frame itself
+        // caught by border noise). The old 0.06 divisor punished documents that fill
+        // the view — the most common framing — so only near-border quads are dinged now.
         val borderScore = ordered.map { point ->
             min(min(point.x / width, 1.0 - point.x / width), min(point.y / height, 1.0 - point.y / height))
-        }.average().let { (it / .06).coerceIn(0.0, 1.0) }
+        }.average().let { (it / .025).coerceIn(0.0, 1.0) }
         val areaScore = ((areaRatio - MIN_AREA_RATIO) / (.72 - MIN_AREA_RATIO)).coerceIn(0.0, 1.0)
         val edgeScore = edgeSupport(edgeMask, ordered)
         val topWidth = hypot(ordered[1].x - ordered[0].x, ordered[1].y - ordered[0].y)
