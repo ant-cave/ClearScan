@@ -22,8 +22,8 @@ android {
         applicationId = "com.clearscan"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.2.0-beta.3"
+        versionCode = 9
+        versionName = "1.2.0-beta.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a")

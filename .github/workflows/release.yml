@@ -30,6 +30,15 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.CLEARSCAN_KEYSTORE_BASE64 }}
         run: echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/clearscan-release.jks"
+      - name: Verify tag matches app version
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          echo "app versionName: $VERSION_NAME"
+          echo "pushed tag:       $GITHUB_REF_NAME"
+          if [ "v$VERSION_NAME" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match app versionName v$VERSION_NAME in app/build.gradle.kts. Bump versionName/versionCode before tagging."
+            exit 1
+          fi
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
       - name: Build signed release APK
