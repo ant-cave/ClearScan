@@ -213,6 +213,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -3032,11 +3033,13 @@ fun CropEditor(
                 val zoomSize = 120f
                 Box(
                     Modifier
-                        .size(zoomSize, zoomSize)
-                        .offset(
-                            x = (handlePos.x - zoomSize / 2).coerceIn(0f, canvasSize.width - zoomSize),
-                            y = (handlePos.y - zoomSize / 2).coerceIn(0f, canvasSize.height - zoomSize),
-                        )
+                        .size(zoomSize.dp)
+                        .offset {
+                            IntOffset(
+                                (handlePos.x - zoomSize / 2).coerceIn(0f, canvasSize.width - zoomSize).toInt(),
+                                (handlePos.y - zoomSize / 2).coerceIn(0f, canvasSize.height - zoomSize).toInt(),
+                            )
+                        }
                         .clip(RoundedCornerShape(12.dp))
                         .background(ComposeColor(0xCC1A1A1A))
                         .border(2.dp, Teal, RoundedCornerShape(12.dp))
@@ -3061,10 +3064,12 @@ fun CropEditor(
                 }
                 Column(
                     Modifier
-                        .offset(
-                            x = (handlePos.x + 40f).coerceIn(0f, canvasSize.width - 70f),
-                            y = (handlePos.y - 70f).coerceIn(0f, canvasSize.height - 70f),
-                        )
+                        .offset {
+                            IntOffset(
+                                (handlePos.x + 40f).coerceIn(0f, canvasSize.width - 70f).toInt(),
+                                (handlePos.y - 70f).coerceIn(0f, canvasSize.height - 70f).toInt(),
+                            )
+                        }
                         .padding(4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(4.dp),
