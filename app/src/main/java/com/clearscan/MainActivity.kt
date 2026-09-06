@@ -2478,8 +2478,8 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     LaunchedEffect(zoomRatio) {
         boundCamera?.cameraInfo?.let { info ->
             val zoomState = info.zoomState.value
-            val minZoom = zoomState.minZoomRatio
-            val maxZoom = zoomState.maxZoomRatio
+            val minZoom = zoomState?.minZoomRatio ?: 1f
+            val maxZoom = zoomState?.maxZoomRatio ?: 5f
             boundCamera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(minZoom, maxZoom))
         }
     }
@@ -2610,7 +2610,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                             )
                         }
                         Spacer(Modifier.height(4.dp))
-                        Icon(Icons.Default.Remove, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Cancel, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
                     }
                 }
             } else {
@@ -2673,15 +2673,15 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                             }
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                     ) {
-                        Icon(
-                            when (mode) {
-                                ScanMode.Document -> Icons.Default.Description
-                                ScanMode.IdCard -> Icons.Default.CreditCard
-                                ScanMode.Book -> Icons.Default.MenuBook
-                                ScanMode.QrCode -> Icons.Default.QrCodeScanner
-                                ScanMode.Barcode -> Icons.Default.BarcodeReader
-                                else -> Icons.Default.CameraAlt
-                            },
+                         Icon(
+                             when (mode) {
+                                 ScanMode.Document -> Icons.Default.Description
+                                 ScanMode.IdCard -> Icons.Default.Payment
+                                 ScanMode.Book -> Icons.Default.Book
+                                 ScanMode.QrCode -> Icons.Default.QrCodeScanner
+                                 ScanMode.Barcode -> Icons.Default.QrCodeScanner
+                                 else -> Icons.Default.CameraAlt
+                             },
                             null,
                             tint = if (selected) Teal else ComposeColor.White.copy(alpha = 0.5f),
                             modifier = Modifier.size(18.dp),
