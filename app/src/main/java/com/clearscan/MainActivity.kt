@@ -1287,6 +1287,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 if (page.processedPath.isBlank() && b != null && page.rotation != 0) ImageProcessor.rotateQuarters(b, page.rotation) else b
             } ?: run { navFlow.value = navFlow.value.copy(busy = false); return@launch }
             val adjusted = withContext(Dispatchers.Default) { ImageProcessor.adjust(base, brightness, contrast, saturation) }
+                ?: run { navFlow.value = navFlow.value.copy(busy = false); return@launch }
             val processedFile = File(page.originalPath).parentFile?.let { File(it, "${page.id}-adjusted.jpg") }
                 ?: File(getApplication<Application>().filesDir, "${page.id}-adjusted.jpg")
             withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(adjusted, processedFile, 88) }
