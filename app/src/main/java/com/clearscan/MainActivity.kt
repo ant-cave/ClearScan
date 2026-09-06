@@ -2676,8 +2676,8 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                          Icon(
                              when (mode) {
                                  ScanMode.Document -> Icons.Default.Description
-                                 ScanMode.IdCard -> Icons.Default.Payment
-                                 ScanMode.Book -> Icons.Default.Book
+                                 ScanMode.IdCard -> Icons.Default.Home
+                                 ScanMode.Book -> Icons.Default.Menu
                                  ScanMode.QrCode -> Icons.Default.QrCodeScanner
                                  ScanMode.Barcode -> Icons.Default.QrCodeScanner
                                  else -> Icons.Default.CameraAlt
