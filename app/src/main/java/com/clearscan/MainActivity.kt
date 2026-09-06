@@ -493,6 +493,12 @@ enum class Screen {
     Shell, Camera, Crop, Edit, Filter, Adjust, Save, Detail, Share, ToolSelect, WatermarkEditor, SignatureEditor, Translate, Settings, Account, Help, About, Legal, AppLogs
 }
 
+enum class EditTab(val title: String, val icon: ImageVector) {
+    Crop("Crop", Icons.Default.Crop),
+    Adjust("Adjust", Icons.Default.Brightness6),
+    Filter("Filter", Icons.Default.Palette),
+}
+
 enum class DocumentCaptureMode { Single, Multi }
 
 @VisibleForTesting
@@ -539,8 +545,9 @@ data class UiState(
     val updateDownload: UpdateDownloadState = UpdateDownloadState(),
     val checkingUpdate: Boolean = false,
     val backStack: List<Screen> = emptyList(),
-    val activeTool: String? = null,
+     val activeTool: String? = null,
     val selectedToolIds: Set<Long> = emptySet(),
+    val selectedDocumentIds: Set<Long> = emptySet(),
     val toolOption: String = "Medium",
     val cropPreset: String = "Original",
     val scanRotationQuarters: Int = 0,
@@ -1146,6 +1153,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         go(Screen.Crop)
     }
 
+    fun setCropPointsForPage(pageIndex: Int, points: List<Offset>) {
+        val state = navFlow.value
+        val pages = state.draftPages.toMutableList()
+        if (pageIndex in pages.indices && points.size >= 4) {
+            pages[pageIndex] = pages[pageIndex].copy(cropPoints = encodeCropPoints(points.take(4)))
+            navFlow.value = state.copy(draftPages = pages)
+        }
+    }
+
     fun toSave() {
         go(Screen.Save)
     }
@@ -1392,6 +1408,25 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             dao.deleteDocument(doc.id)
             replace(Screen.Shell) { copy(selected = null, tab = Tab.Docs, backStack = emptyList()) }
+        }
+    }
+
+    fun toggleDocumentSelection(id: Long) {
+        val current = navFlow.value.selectedDocumentIds
+        navFlow.value = navFlow.value.copy(selectedDocumentIds = if (id in current) current - id else current + id)
+    }
+
+    fun clearDocumentSelection() {
+        navFlow.value = navFlow.value.copy(selectedDocumentIds = emptySet())
+    }
+
+    fun deleteSelectedDocuments() {
+        val ids = navFlow.value.selectedDocumentIds
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            for (id in ids) dao.deleteDocument(id)
+            clearDocumentSelection()
+            replace(Screen.Shell) { copy(tab = Tab.Docs, backStack = emptyList()) }
         }
     }
 
@@ -2249,11 +2284,17 @@ fun DocumentListCard(documents: List<Document>, model: ClearScanViewModel) {
 }
 
 @Composable
-fun DocumentRow(document: Document, model: ClearScanViewModel) {
+fun DocumentRow(document: Document, model: ClearScanViewModel, selected: Boolean = false, onToggleSelect: (() -> Unit)? = null) {
     Row(
-        Modifier.fillMaxWidth().clickable { model.openDocument(document) }.padding(16.dp),
+        Modifier.fillMaxWidth()
+            .then(if (onToggleSelect != null) Modifier.clickable { onToggleSelect() } else Modifier.clickable { model.openDocument(document) })
+            .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (onToggleSelect != null) {
+            Checkbox(checked = selected, onCheckedChange = { onToggleSelect() })
+            Spacer(Modifier.width(8.dp))
+        }
         Thumbnail(document.thumbnailPath, Modifier.size(58.dp, 74.dp))
         Spacer(Modifier.width(18.dp))
         Column(Modifier.weight(1f)) {
@@ -2330,9 +2371,30 @@ fun DocsScreen(state: UiState, model: ClearScanViewModel) {
                 IconButton(onClick = { folderAction = folder; folderActionName = folder.name }) { Icon(Icons.Default.MoreVert, null, tint = Muted) }
             }
         }
-        items(state.documents, key = { it.id }) { doc -> DocumentRow(doc, model) }
+        items(state.documents, key = { it.id }) { doc ->
+            DocumentRow(doc, model, selected = doc.id in state.selectedDocumentIds, onToggleSelect = { model.toggleDocumentSelection(doc.id) })
+        }
     }
-    Box(Modifier.fillMaxSize().padding(bottom = 26.dp, end = 26.dp), contentAlignment = Alignment.BottomEnd) {
+    // Batch action bar
+    if (state.selectedDocumentIds.isNotEmpty()) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            shape = RoundedCornerShape(16.dp),
+            shadowElevation = 8.dp,
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("${state.selectedDocumentIds.size} selected", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { model.deleteSelectedDocuments() }) { Icon(Icons.Default.Delete, null, tint = ComposeColor(0xFFE53935)) }
+                IconButton(onClick = { /* share */ }) { Icon(Icons.Default.Share, null) }
+                IconButton(onClick = { model.clearDocumentSelection() }) { Icon(Icons.Default.Close, null) }
+            }
+        }
+    }
+    Box(Modifier.fillMaxSize().padding(bottom = if (state.selectedDocumentIds.isNotEmpty()) 88.dp else 26.dp, end = 26.dp), contentAlignment = Alignment.BottomEnd) {
         Box(Modifier.size(72.dp).clip(CircleShape).background(Teal).clickable { model.openCamera() }, contentAlignment = Alignment.Center) {
             Icon(Icons.Default.CameraAlt, null, tint = ComposeColor.White, modifier = Modifier.size(34.dp))
         }
@@ -2391,9 +2453,6 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     val context = LocalContext.current
     val settings = state.settings
     val imageCapture = remember(settings.cameraResolution) {
-        // 4:3 matches the native sensor mode on most devices, which keeps the full
-        // sensor width in play; capture mode decides between full-resolution stills
-        // (High/MAXIMIZE_QUALITY) and low-latency preview-matched stills (Balanced).
         val resolutionSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
             .build()
@@ -2408,11 +2467,20 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     var settingsOpen by remember { mutableStateOf(false) }
     var pendingMode by remember { mutableStateOf<ScanMode?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
+    var zoomRatio by remember { mutableFloatStateOf(1f) }
     val flashAlpha by animateFloatAsState(if (flashVisible) 1f else 0f, animationSpec = tween(durationMillis = 300), label = "flash")
     LaunchedEffect(flashVisible) {
         if (flashVisible) {
             kotlinx.coroutines.delay(300)
             flashVisible = false
+        }
+    }
+    LaunchedEffect(zoomRatio) {
+        boundCamera?.cameraInfo?.let { info ->
+            val zoomState = info.zoomState.value
+            val minZoom = zoomState.minZoomRatio
+            val maxZoom = zoomState.maxZoomRatio
+            boundCamera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(minZoom, maxZoom))
         }
     }
     val analyzer = remember(state.scanMode) {
@@ -2435,35 +2503,48 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
         hasCameraPermission = granted
         if (!granted) Toast.makeText(context, tr(settings, "Camera permission is needed to scan.", "扫描需要相机权限"), Toast.LENGTH_SHORT).show()
     }
+    val scanModes = listOf(
+        ScanMode.Document to tr(settings, "Document", "文档"),
+        ScanMode.IdCard to tr(settings, "ID", "证件"),
+        ScanMode.Book to tr(settings, "Book", "书籍"),
+        ScanMode.QrCode to tr(settings, "QR", "二维码"),
+        ScanMode.Barcode to tr(settings, "Data", "条码"),
+    )
     Column(Modifier.fillMaxSize().background(ComposeColor.Black).statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = ComposeColor.White) }
-            IconButton(
-                enabled = boundCamera?.cameraInfo?.hasFlashUnit() == true,
-                onClick = {
-                    flashMode = when (flashMode) {
-                        ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
-                        ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_OFF
-                        else -> ImageCapture.FLASH_MODE_AUTO
-                    }
-                },
-            ) {
-                Icon(
-                    when (flashMode) {
-                        ImageCapture.FLASH_MODE_ON -> Icons.Default.FlashOn
-                        ImageCapture.FLASH_MODE_OFF -> Icons.Default.FlashOff
-                        else -> Icons.Default.FlashAuto
+        // === 顶栏：紧凑 48dp ===
+        Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = model::back, modifier = Modifier.size(40.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = ComposeColor.White, modifier = Modifier.size(22.dp)) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(
+                    enabled = boundCamera?.cameraInfo?.hasFlashUnit() == true,
+                    onClick = {
+                        flashMode = when (flashMode) {
+                            ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+                            ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_OFF
+                            else -> ImageCapture.FLASH_MODE_AUTO
+                        }
                     },
-                    null,
-                    tint = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) ComposeColor.White else Muted,
-                )
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        when (flashMode) {
+                            ImageCapture.FLASH_MODE_ON -> Icons.Default.FlashOn
+                            ImageCapture.FLASH_MODE_OFF -> Icons.Default.FlashOff
+                            else -> Icons.Default.FlashAuto
+                        },
+                        null,
+                        tint = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) ComposeColor.White else Muted,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                IconButton(onClick = { lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Cameraswitch, null, tint = ComposeColor.White, modifier = Modifier.size(22.dp))
+                }
+                IconButton(onClick = { settingsOpen = true }, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Settings, null, tint = ComposeColor.White, modifier = Modifier.size(22.dp)) }
             }
-            IconButton(onClick = { lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK }) {
-                Icon(Icons.Default.Cameraswitch, null, tint = ComposeColor.White)
-            }
-            IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, null, tint = ComposeColor.White) }
         }
-        Box(Modifier.weight(1f).fillMaxWidth().background(ComposeColor(0xFF6E4E32)), contentAlignment = Alignment.Center) {
+        // === 相机预览 + 右侧缩放滑块 ===
+        Box(Modifier.weight(1f).fillMaxWidth().background(ComposeColor(0xFF1A1A1A)), contentAlignment = Alignment.Center) {
             if (hasCameraPermission) {
                 key(lensFacing, state.scanMode) {
                     CameraPreview(
@@ -2478,14 +2559,59 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     )
                 }
                 if (state.settings.cameraGrid) Canvas(Modifier.fillMaxSize()) {
-                    val color = ComposeColor.White.copy(alpha = .42f)
-                    drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), 1.5f)
-                    drawLine(color, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), 1.5f)
-                    drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1.5f)
-                    drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1.5f)
+                    val color = ComposeColor.White.copy(alpha = .35f)
+                    drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), 1f)
+                    drawLine(color, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), 1f)
+                    drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1f)
+                    drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1f)
                 }
                 if (state.scanMode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) {
                     LiveDocumentGuide(state.liveDocumentFrame, Modifier.fillMaxSize())
+                }
+                // 右侧竖向缩放滑块
+                if (boundCamera?.cameraInfo?.hasFlashUnit() == true || boundCamera != null) {
+                    Column(
+                        Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 8.dp)
+                            .width(36.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(ComposeColor(0x66000000))
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(Icons.Default.Add, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.height(4.dp))
+                        Box(
+                            Modifier
+                                .width(2.dp)
+                                .height(120.dp)
+                                .clip(RoundedCornerShape(1.dp))
+                                .background(ComposeColor(0x44FFFFFF))
+                        ) {
+                            val maxZoom = boundCamera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 10f
+                            val fraction = ((zoomRatio - 1f) / (maxZoom - 1f)).coerceIn(0f, 1f)
+                            Box(
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .offset(y = with(LocalDensity.current) { -(fraction * 120f).dp })
+                                    .size(14.dp)
+                                    .clip(CircleShape)
+                                    .background(ComposeColor.White)
+                                    .pointerInput(Unit) {
+                                        detectDragGestures { change, drag ->
+                                            change.consume()
+                                            val maxZoom2 = boundCamera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 10f
+                                            val delta = -drag.y / 120f * (maxZoom2 - 1f)
+                                            zoomRatio = (zoomRatio + delta).coerceIn(1f, maxZoom2)
+                                        }
+                                    }
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Icon(Icons.Default.Remove, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                    }
                 }
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2494,15 +2620,12 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     Text(tr(settings, "Allow camera access to scan real documents", "允许相机权限后即可扫描真实文档"), color = ComposeColor.White, fontSize = 15.sp)
                 }
             }
+            // 闪白动画
             if (flashAlpha > 0.01f) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(ComposeColor.White.copy(alpha = flashAlpha))
-                )
+                Box(Modifier.fillMaxSize().background(ComposeColor.White.copy(alpha = flashAlpha)))
             }
             if (state.captureMessage != null) {
-                Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 9.dp), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
             state.codeResult?.let { result ->
                 Card(
@@ -2523,111 +2646,177 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
         }
-        Column(Modifier.fillMaxWidth().background(ComposeColor.Black).navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                listOf(
-                    ScanMode.IdCard to tr(settings, "ID", "证件"),
-                    ScanMode.Document to tr(settings, "Document", "文档"),
-                    ScanMode.Book to tr(settings, "Book", "书籍"),
-                    ScanMode.QrCode to tr(settings, "QR", "二维码"),
-                    ScanMode.Barcode to tr(settings, "Data", "条码"),
-                ).forEach {
-                    val selected = it.first == state.scanMode
-                    Text(
-                        it.second,
-                        Modifier.clip(RoundedCornerShape(6.dp)).background(if (selected) Teal.copy(alpha = .18f) else ComposeColor.Transparent).clickable {
-                            if (state.draftPages.isNotEmpty() && it.first != state.scanMode) pendingMode = it.first else model.changeScanMode(it.first)
-                        }.padding(horizontal = 10.dp, vertical = 12.dp),
-                        color = if (selected) Teal else ComposeColor.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+        // === 底部 108dp 三层面板 ===
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(ComposeColor(0xFF111111))
+                .navigationBarsPadding(),
+        ) {
+            // 第一层：模式选择横滑条
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                scanModes.forEach { (mode, label) ->
+                    val selected = mode == state.scanMode
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                if (state.draftPages.isNotEmpty() && mode != state.scanMode) pendingMode = mode else model.changeScanMode(mode)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Icon(
+                            when (mode) {
+                                ScanMode.Document -> Icons.Default.Description
+                                ScanMode.IdCard -> Icons.Default.CreditCard
+                                ScanMode.Book -> Icons.Default.MenuBook
+                                ScanMode.QrCode -> Icons.Default.QrCodeScanner
+                                ScanMode.Barcode -> Icons.Default.BarcodeReader
+                                else -> Icons.Default.CameraAlt
+                            },
+                            null,
+                            tint = if (selected) Teal else ComposeColor.White.copy(alpha = 0.5f),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.height(1.dp))
+                        Text(label, color = if (selected) Teal else ComposeColor.White.copy(alpha = 0.5f), fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                    }
                 }
             }
+            // 单页/多页切换（仅文档模式）
             if (state.scanMode == ScanMode.Document) {
-                Spacer(Modifier.height(7.dp))
-                Row(Modifier.clip(RoundedCornerShape(7.dp)).background(ComposeColor(0xFF1C1C1C)).padding(3.dp)) {
+                Row(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(ComposeColor(0xFF222222))
+                        .padding(2.dp),
+                ) {
                     listOf(
-                        DocumentCaptureMode.Single to tr(settings, "Single page", "单页"),
-                        DocumentCaptureMode.Multi to tr(settings, "Multiple pages", "多页"),
+                        DocumentCaptureMode.Single to tr(settings, "Single", "单页"),
+                        DocumentCaptureMode.Multi to tr(settings, "Multi", "多页"),
                     ).forEach { (mode, label) ->
                         val selected = mode == state.documentCaptureMode
                         Text(
                             label,
-                            Modifier.clip(RoundedCornerShape(5.dp)).background(if (selected) Teal else ComposeColor.Transparent).clickable { model.changeDocumentCaptureMode(mode) }.padding(horizontal = 18.dp, vertical = 10.dp),
+                            Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) Teal else ComposeColor.Transparent)
+                                .clickable { model.changeDocumentCaptureMode(mode) }
+                                .padding(horizontal = 16.dp, vertical = 5.dp),
                             color = ComposeColor.White,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
-                CameraSmallButton(Icons.Default.PhotoLibrary) { pickImage.launch("image/*") }
-                Box(Modifier.size(78.dp).clip(CircleShape).background(ComposeColor.White).border(5.dp, Teal, CircleShape).clickable {
-                    if (hasCameraPermission) {
-                        flashVisible = true
-                        takeRealPhoto(context, imageCapture, model, settings)
-                    } else permission.launch(Manifest.permission.CAMERA)
-                }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.CameraAlt, null, tint = Teal, modifier = Modifier.size(34.dp))
+            // 第二层：快门按钮区
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(72.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 左：相册导入
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(ComposeColor(0xFF222222))
+                        .clickable { pickImage.launch("image/*") },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Default.PhotoLibrary, null, tint = ComposeColor.White, modifier = Modifier.size(22.dp))
                 }
+                // 中：快门按钮（带波纹圈）
+                Box(contentAlignment = Alignment.Center) {
+                    // 外圈波纹
+                    Box(
+                        Modifier
+                            .size(88.dp)
+                            .clip(CircleShape)
+                            .border(2.dp, Teal.copy(alpha = 0.3f), CircleShape)
+                    )
+                    // 主按钮
+                    Box(
+                        Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(ComposeColor.White)
+                            .border(4.dp, Teal, CircleShape)
+                            .clickable {
+                                if (hasCameraPermission) {
+                                    flashVisible = true
+                                    takeRealPhoto(context, imageCapture, model, settings)
+                                } else permission.launch(Manifest.permission.CAMERA)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.CameraAlt, null, tint = Teal, modifier = Modifier.size(30.dp))
+                    }
+                }
+                // 右：已完成页数堆叠 / 扫描仪图标
                 if (state.draftPages.isNotEmpty()) {
-                    // 略缩图堆叠 + 红点角标
-                    Box(Modifier.size(50.dp), contentAlignment = Alignment.BottomEnd) {
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .offset(x = 2.dp, y = (-2).dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(ComposeColor(0xFF2A2A2A))
-                                .border(1.dp, ComposeColor(0xFF444444), RoundedCornerShape(8.dp))
-                        )
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .offset(x = (-2).dp, y = 2.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(ComposeColor(0xFF333333))
-                                .border(1.dp, ComposeColor(0xFF555555), RoundedCornerShape(8.dp))
-                        )
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(ComposeColor(0xFF1A1A1A))
-                                .border(1.5.dp, Teal, RoundedCornerShape(8.dp))
-                                .clickable { model.finishScanSession() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Default.DocumentScanner, null, tint = Teal, modifier = Modifier.size(24.dp))
-                        }
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ComposeColor(0xFF222222))
+                            .clickable { model.finishScanSession() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.DocumentScanner, null, tint = Teal, modifier = Modifier.size(22.dp))
+                        // 红色角标
                         Box(
                             Modifier
                                 .align(Alignment.TopEnd)
-                                .offset(x = (-4).dp, y = 4.dp)
-                                .size(20.dp)
+                                .offset(x = 4.dp, y = (-4).dp)
+                                .size(16.dp)
                                 .clip(CircleShape)
                                 .background(ComposeColor(0xFFE53935)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 } else {
-                    CameraSmallButton(Icons.Default.DocumentScanner) {
-                        if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ComposeColor(0xFF222222))
+                            .clickable {
+                                if (hasCameraPermission) {
+                                    flashVisible = true
+                                    takeRealPhoto(context, imageCapture, model, settings)
+                                } else permission.launch(Manifest.permission.CAMERA)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.DocumentScanner, null, tint = ComposeColor.White.copy(alpha = 0.5f), modifier = Modifier.size(22.dp))
                     }
                 }
             }
+            // 第三层：提示文字
             if (state.draftPages.isNotEmpty()) {
                 Text(
-                    tr(settings, "${state.draftPages.size} pages • tap the right button when finished", "已拍摄 ${state.draftPages.size} 页 • 完成后点击右侧按钮"),
-                    color = ComposeColor.White,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 8.dp),
+                    tr(settings, "${state.draftPages.size} pages captured", "已拍摄 ${state.draftPages.size} 页"),
+                    color = ComposeColor.White.copy(alpha = 0.5f),
+                    fontSize = 11.sp,
+                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 4.dp),
                 )
+            } else {
+                Spacer(Modifier.height(16.dp))
             }
         }
     }
@@ -3253,7 +3442,7 @@ fun EditScreen(state: UiState, model: ClearScanViewModel) {
     val currentPageIndex = pagerState.currentPage.coerceAtMost(pageCount - 1)
     val currentPage = draftPages.getOrNull(currentPageIndex)
     val filters = remember { DocumentFilters }
-    // Current page's source image; filtered pages reload when the edit version bumps.
+    var selectedTab by remember { mutableStateOf(EditTab.Crop) }
     val pageBitmap by produceState<Bitmap?>(initialValue = null, currentPage?.id, state.editVersion) {
         value = withContext(Dispatchers.IO) {
             if (currentPage == null) {
@@ -3278,32 +3467,110 @@ fun EditScreen(state: UiState, model: ClearScanViewModel) {
                 Modifier.fillMaxWidth().padding(top = 4.dp), textAlign = TextAlign.Center, color = Muted, fontSize = 13.sp,
             )
         }
-        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth()) { index ->
-            val page = draftPages.getOrNull(index)
-            val fallback = if (draftPages.isEmpty()) state.processedBitmap ?: state.scanBitmap else null
-            Box(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-                val bitmap by produceState<Bitmap?>(initialValue = fallback, page?.id, state.editVersion) {
-                    value = withContext(Dispatchers.IO) {
-                        if (page == null) fallback
-                        else {
-                            val p = page.processedPath.ifBlank { page.originalPath }
-                            val b = ImageProcessor.readBitmap(p, 1400)
-                            if (b != null && page.processedPath.isBlank() && page.rotation != 0) ImageProcessor.rotateQuarters(b, page.rotation) else b
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (selectedTab) {
+                EditTab.Crop -> {
+                    val cropPoints = remember(currentPage?.cropPoints) {
+                        currentPage?.cropPoints?.let { decodeCropPoints(it) } ?: defaultCropPoints()
+                    }
+                    var localCropPoints by remember { mutableStateOf(cropPoints) }
+                    CropEditor(
+                        bitmap = pageBitmap,
+                        points = localCropPoints,
+                        onPointsChange = { newPoints ->
+                            localCropPoints = newPoints
+                            model.setCropPointsForPage(currentPageIndex, newPoints)
+                        },
+                    )
+                }
+                EditTab.Adjust -> {
+                    if (pageBitmap != null) {
+                        val preview = remember(pageBitmap) { ImageProcessor.previewBitmap(pageBitmap, 900) }
+                        var brightness by remember { mutableFloatStateOf(0.1f) }
+                        var contrast by remember { mutableFloatStateOf(1.15f) }
+                        var saturation by remember { mutableFloatStateOf(1.2f) }
+                        var adjustedPreview by remember(preview, brightness, contrast, saturation) { mutableStateOf(preview) }
+                        LaunchedEffect(preview, brightness, contrast, saturation) {
+                            delay(45)
+                            adjustedPreview = withContext(Dispatchers.Default) { ImageProcessor.adjust(preview, brightness, contrast, saturation) }
+                        }
+                        Column(Modifier.fillMaxSize().padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            ScanBitmap(adjustedPreview, Modifier.fillMaxWidth().aspectRatio(.72f))
+                            Spacer(Modifier.height(8.dp))
+                            Adjustment(tr(settings, "Brightness", "亮度"), brightness, -0.4f..0.4f) { brightness = it }
+                            Adjustment(tr(settings, "Contrast", "对比度"), contrast, 0.5f..1.8f) { contrast = it }
+                            Adjustment(tr(settings, "Saturation", "饱和度"), saturation, 0f..2f) { saturation = it }
+                        }
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(tr(settings, "No image", "暂无图片"), color = Muted)
                         }
                     }
                 }
-                ScanBitmap(bitmap ?: fallback, Modifier.fillMaxWidth().aspectRatio(.72f))
+                EditTab.Filter -> {
+                    val fallback = if (draftPages.isEmpty()) state.processedBitmap ?: state.scanBitmap else null
+                    Box(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        val bitmap by produceState<Bitmap?>(initialValue = fallback, currentPage?.id, state.editVersion) {
+                            value = withContext(Dispatchers.IO) {
+                                if (currentPage == null) fallback
+                                else {
+                                    val p = currentPage.processedPath.ifBlank { currentPage.originalPath }
+                                    val b = ImageProcessor.readBitmap(p, 1400)
+                                    if (b != null && currentPage.processedPath.isBlank() && currentPage.rotation != 0) ImageProcessor.rotateQuarters(b, currentPage.rotation) else b
+                                }
+                            }
+                        }
+                        ScanBitmap(bitmap ?: fallback, Modifier.fillMaxWidth().aspectRatio(.72f))
+                    }
+                    LazyRow(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(filters) { filter ->
+                            val selected = filter == state.selectedFilter
+                            val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
+                            Column(Modifier.width(84.dp).clickable { model.applyFilterToPage(currentPageIndex, filter) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                                ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp).clip(RoundedCornerShape(6.dp)))
+                                Spacer(Modifier.height(6.dp))
+                                Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
             }
         }
-        // Directly show every filter effect for the current page; tapping applies it to that page.
-        LazyRow(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(filters) { filter ->
-                val selected = filter == state.selectedFilter
-                val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
-                Column(Modifier.width(84.dp).clickable { model.applyFilterToPage(currentPageIndex, filter) }, horizontalAlignment = Alignment.CenterHorizontally) {
-                    ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp).clip(RoundedCornerShape(6.dp)))
-                    Spacer(Modifier.height(6.dp))
-                    Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
+        if (draftPages.size > 1) {
+            LazyRow(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(draftPages.size, key = { draftPages[it].id }) { index ->
+                    val page = draftPages[index]
+                    Box(
+                        Modifier
+                            .size(54.dp, 70.dp)
+                            .border(if (index == currentPageIndex) 3.dp else 1.dp, if (index == currentPageIndex) Teal else Muted, RoundedCornerShape(5.dp))
+                            .clickable { model.selectDraftPage(index) },
+                    ) {
+                        Thumbnail(page.thumbnailPath, Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            EditTab.entries.forEach { tab ->
+                val selected = tab == selectedTab
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { selectedTab = tab }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(tab.icon, tab.title, tint = if (selected) Teal else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.height(3.dp))
+                    Text(tab.title, fontSize = 11.sp, color = if (selected) Teal else MaterialTheme.colorScheme.onSurface)
                 }
             }
         }
