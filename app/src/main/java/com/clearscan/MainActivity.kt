@@ -2610,7 +2610,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                             )
                         }
                         Spacer(Modifier.height(4.dp))
-                        Icon(Icons.Default.Cancel, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Close, null, tint = ComposeColor.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
                     }
                 }
             } else {
@@ -2677,7 +2677,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                              when (mode) {
                                  ScanMode.Document -> Icons.Default.Description
                                  ScanMode.IdCard -> Icons.Default.Home
-                                 ScanMode.Book -> Icons.Default.Menu
+                                 ScanMode.Book -> Icons.Default.Description
                                  ScanMode.QrCode -> Icons.Default.QrCodeScanner
                                  ScanMode.Barcode -> Icons.Default.QrCodeScanner
                                  else -> Icons.Default.CameraAlt
