@@ -1271,6 +1271,38 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** Applies brightness/contrast/saturation to one page of the edit pager and persists it. */
+    fun applyAdjustToPage(index: Int, brightness: Float, contrast: Float, saturation: Float) {
+        val state = navFlow.value
+        val page = state.draftPages.getOrNull(index)
+        if (page == null) {
+            applyAdjust(brightness, contrast, saturation)
+            return
+        }
+        val sourcePath = page.processedPath.ifBlank { page.originalPath }
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(busy = true)
+            val base = withContext(Dispatchers.IO) {
+                val b = ImageProcessor.readBitmap(sourcePath, 2560)
+                if (page.processedPath.isBlank() && b != null && page.rotation != 0) ImageProcessor.rotateQuarters(b, page.rotation) else b
+            } ?: run { navFlow.value = navFlow.value.copy(busy = false); return@launch }
+            val adjusted = withContext(Dispatchers.Default) { ImageProcessor.adjust(base, brightness, contrast, saturation) }
+            val processedFile = File(page.originalPath).parentFile?.let { File(it, "${page.id}-adjusted.jpg") }
+                ?: File(getApplication<Application>().filesDir, "${page.id}-adjusted.jpg")
+            withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(adjusted, processedFile, 88) }
+            val updated = page.copy(processedPath = processedFile.absolutePath)
+            dao.upsertDraftPage(updated)
+            val current = navFlow.value
+            navFlow.value = current.copy(
+                draftPages = current.draftPages.map { if (it.id == updated.id) updated else it },
+                processedBitmap = adjusted,
+                scanBitmap = adjusted,
+                editVersion = current.editVersion + 1,
+                busy = false,
+            )
+        }
+    }
+
     fun saveDocument(title: String, quality: String) {
         val bitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val stateAtSave = navFlow.value
@@ -3497,9 +3529,18 @@ fun EditScreen(state: UiState, model: ClearScanViewModel) {
                         Column(Modifier.fillMaxSize().padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             ScanBitmap(adjustedPreview, Modifier.fillMaxWidth().aspectRatio(.72f))
                             Spacer(Modifier.height(8.dp))
-                            Adjustment(tr(settings, "Brightness", "亮度"), brightness, -0.4f..0.4f) { brightness = it }
-                            Adjustment(tr(settings, "Contrast", "对比度"), contrast, 0.5f..1.8f) { contrast = it }
-                            Adjustment(tr(settings, "Saturation", "饱和度"), saturation, 0f..2f) { saturation = it }
+                            Adjustment(tr(settings, "Brightness", "亮度"), brightness, -0.4f..0.4f) {
+                                brightness = it
+                                model.applyAdjustToPage(currentPageIndex, brightness, contrast, saturation)
+                            }
+                            Adjustment(tr(settings, "Contrast", "对比度"), contrast, 0.5f..1.8f) {
+                                contrast = it
+                                model.applyAdjustToPage(currentPageIndex, brightness, contrast, saturation)
+                            }
+                            Adjustment(tr(settings, "Saturation", "饱和度"), saturation, 0f..2f) {
+                                saturation = it
+                                model.applyAdjustToPage(currentPageIndex, brightness, contrast, saturation)
+                            }
                         }
                     } else {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -3508,28 +3549,100 @@ fun EditScreen(state: UiState, model: ClearScanViewModel) {
                     }
                 }
                 EditTab.Filter -> {
-                    val fallback = if (draftPages.isEmpty()) state.processedBitmap ?: state.scanBitmap else null
-                    Box(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-                        val bitmap by produceState<Bitmap?>(initialValue = fallback, currentPage?.id, state.editVersion) {
-                            value = withContext(Dispatchers.IO) {
-                                if (currentPage == null) fallback
-                                else {
-                                    val p = currentPage.processedPath.ifBlank { currentPage.originalPath }
-                                    val b = ImageProcessor.readBitmap(p, 1400)
-                                    if (b != null && currentPage.processedPath.isBlank() && currentPage.rotation != 0) ImageProcessor.rotateQuarters(b, currentPage.rotation) else b
+                    val tunableFilters = remember { setOf("Smart Gray", "Magic Color", "B&W", "Ink", "White Paper") }
+                    var filterParams by remember { mutableStateOf(FilterParams()) }
+                    var filterPreview by remember(currentPage) { mutableStateOf<Bitmap?>(null) }
+                    var filterCache by remember(currentPage) { mutableStateOf(mapOf<String, Bitmap?>()) }
+                    LaunchedEffect(currentPage, state.selectedFilter, filterParams) {
+                        val key = filterCacheKey(state.selectedFilter, filterParams)
+                        filterCache[key]?.let { filterPreview = it; return@LaunchedEffect }
+                        delay(60)
+                        val generated = withContext(Dispatchers.Default) { ImageProcessor.filter(pageBitmap, state.selectedFilter, filterParams) }
+                        filterPreview = generated
+                        filterCache = (filterCache + (key to generated)).entries.toList().takeLast(4).associate { it.key to it.value }
+                    }
+                    Column(Modifier.fillMaxSize()) {
+                        Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp), contentAlignment = Alignment.Center) {
+                            ScanBitmap(filterPreview ?: pageBitmap, Modifier.fillMaxWidth().aspectRatio(.72f))
+                        }
+                        LazyRow(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(filters) { filter ->
+                                val selected = filter == state.selectedFilter
+                                val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
+                                Column(Modifier.width(84.dp).clickable { model.applyFilterToPage(currentPageIndex, filter, filterParams) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                                    ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp).clip(RoundedCornerShape(6.dp)))
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
                                 }
                             }
                         }
-                        ScanBitmap(bitmap ?: fallback, Modifier.fillMaxWidth().aspectRatio(.72f))
-                    }
-                    LazyRow(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(filters) { filter ->
-                            val selected = filter == state.selectedFilter
-                            val chipAlpha by animateFloatAsState(if (selected) 1f else 0f, animationSpec = tween(180), label = "filter-chip")
-                            Column(Modifier.width(84.dp).clickable { model.applyFilterToPage(currentPageIndex, filter) }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                ScanBitmap(thumbPreviews[filter], Modifier.size(76.dp, 98.dp).clip(RoundedCornerShape(6.dp)))
-                                Spacer(Modifier.height(6.dp))
-                                Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
+                        if (state.selectedFilter in tunableFilters) {
+                            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 4.dp)) {
+                                when (state.selectedFilter) {
+                                    "White Paper" -> FilterAdjustment(
+                                        label = tr(settings, "Paper Lift", "纸张提亮"),
+                                        valueText = "%.2f".format(filterParams.paperLift),
+                                        value = filterParams.paperLift,
+                                        range = .72f..1f,
+                                    ) {
+                                        filterParams = filterParams.copy(paperLift = it)
+                                        model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                    }
+                                    "Smart Gray", "Magic Color" -> {
+                                        FilterAdjustment(
+                                            label = tr(settings, "Enhance", "增强"),
+                                            valueText = "%.0f%%".format(filterParams.smartStrength * 100),
+                                            value = filterParams.smartStrength,
+                                            range = 0f..1.3f,
+                                        ) {
+                                            filterParams = filterParams.copy(smartStrength = it)
+                                            model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                        }
+                                        FilterAdjustment(
+                                            label = tr(settings, "Sharpen", "锐化"),
+                                            valueText = "%.1fx".format(filterParams.sharpenScale),
+                                            value = filterParams.sharpenScale,
+                                            range = 0f..1.6f,
+                                        ) {
+                                            filterParams = filterParams.copy(sharpenScale = it)
+                                            model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                        }
+                                    }
+                                    else -> {
+                                        FilterAdjustment(
+                                            label = tr(settings, "Threshold", "阈值"),
+                                            valueText = filterParams.threshold.toInt().toString(),
+                                            value = filterParams.threshold,
+                                            range = 2f..30f,
+                                        ) {
+                                            filterParams = filterParams.copy(threshold = it)
+                                            model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                        }
+                                        FilterAdjustment(
+                                            label = tr(settings, "Sharpen", "锐化"),
+                                            valueText = "%.1fx".format(filterParams.sharpenScale),
+                                            value = filterParams.sharpenScale,
+                                            range = 0f..1.6f,
+                                        ) {
+                                            filterParams = filterParams.copy(sharpenScale = it)
+                                            model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                        }
+                                        val denoiseLabel = when (filterParams.denoise) {
+                                            1 -> tr(settings, "Off", "关")
+                                            5 -> tr(settings, "Strong", "强")
+                                            else -> tr(settings, "Standard", "标准")
+                                        }
+                                        FilterAdjustment(
+                                            label = tr(settings, "Denoise", "降噪"),
+                                            valueText = denoiseLabel,
+                                            value = when (filterParams.denoise) { 1 -> 0f; 5 -> 2f; else -> 1f },
+                                            range = 0f..2f,
+                                        ) {
+                                            filterParams = filterParams.copy(denoise = when (it.roundToInt()) { 0 -> 1; 2 -> 5; else -> 3 })
+                                            model.applyFilterToPage(currentPageIndex, state.selectedFilter, filterParams)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
