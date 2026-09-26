@@ -111,6 +111,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
@@ -2571,19 +2572,19 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                 Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        // === 底部 108dp 三层面板 ===
+        // === 底部面板（CamScanner 风格：模式卡片 → 快门行 → 单/多页 → 提示） ===
         Column(
             Modifier
                 .fillMaxWidth()
-                .background(ComposeColor(0xFF111111))
+                .background(ComposeColor(0xFF0A0A0A))
                 .navigationBarsPadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // 第一层：模式选择横滑条
+            // ① 模式卡片横排：圆角芯片图标 + 下方文字
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(36.dp)
-                    .padding(horizontal = 8.dp),
+                    .padding(top = 12.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -2592,155 +2593,160 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(16.dp))
                             .clickable {
                                 if (state.draftPages.isNotEmpty() && mode != state.scanMode) pendingMode = mode else model.changeScanMode(mode)
                             }
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                            .padding(horizontal = 14.dp, vertical = 4.dp),
                     ) {
-                         Icon(
-                             when (mode) {
-                                 ScanMode.Document -> Icons.Default.Description
-                                 ScanMode.IdCard -> Icons.Default.Home
-                                 ScanMode.Book -> Icons.Default.Description
-                                 else -> Icons.Default.CameraAlt
-                             },
-                            null,
-                            tint = if (selected) Teal else ComposeColor.White.copy(alpha = 0.5f),
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(Modifier.height(1.dp))
-                        Text(label, color = if (selected) Teal else ComposeColor.White.copy(alpha = 0.5f), fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-                    }
-                }
-            }
-            // 单页/多页切换（仅文档模式）
-            if (state.scanMode == ScanMode.Document) {
-                Row(
-                    Modifier
-                        .align(Alignment.CenterHorizontally)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(ComposeColor(0xFF222222))
-                        .padding(2.dp),
-                ) {
-                    listOf(
-                        DocumentCaptureMode.Single to tr(settings, "Single", "单页"),
-                        DocumentCaptureMode.Multi to tr(settings, "Multi", "多页"),
-                    ).forEach { (mode, label) ->
-                        val selected = mode == state.documentCaptureMode
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(13.dp))
+                                .background(if (selected) Teal else ComposeColor.White.copy(alpha = 0.08f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                when (mode) {
+                                    ScanMode.IdCard -> Icons.Outlined.Badge
+                                    ScanMode.Book -> Icons.Default.AutoStories
+                                    else -> Icons.Default.Description
+                                },
+                                null,
+                                tint = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.75f),
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Spacer(Modifier.height(5.dp))
                         Text(
                             label,
-                            Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (selected) Teal else ComposeColor.Transparent)
-                                .clickable { model.changeDocumentCaptureMode(mode) }
-                                .padding(horizontal = 16.dp, vertical = 5.dp),
-                            color = ComposeColor.White,
+                            color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f),
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                         )
                     }
                 }
             }
-            // 第二层：快门按钮区
+            // ② 快门行：相册导入 | 白色快门+细环 | 批量页数
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(72.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                    .padding(horizontal = 40.dp)
+                    .height(92.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // 左：相册导入
                 Box(
                     Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(ComposeColor(0xFF222222))
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(ComposeColor.White.copy(alpha = 0.08f))
                         .clickable { pickImage.launch("image/*") },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Default.PhotoLibrary, null, tint = ComposeColor.White, modifier = Modifier.size(22.dp))
                 }
-                // 中：快门按钮（带波纹圈）
+                // 中：快门（外细环 + 白色实心圆）
                 Box(contentAlignment = Alignment.Center) {
-                    // 外圈波纹
                     Box(
                         Modifier
-                            .size(88.dp)
+                            .size(86.dp)
                             .clip(CircleShape)
-                            .border(2.dp, Teal.copy(alpha = 0.3f), CircleShape)
+                            .border(2.dp, ComposeColor.White.copy(alpha = 0.9f), CircleShape)
                     )
-                    // 主按钮
                     Box(
                         Modifier
-                            .size(72.dp)
+                            .size(70.dp)
                             .clip(CircleShape)
                             .background(ComposeColor.White)
-                            .border(4.dp, Teal, CircleShape)
                             .clickable {
                                 if (hasCameraPermission) {
                                     flashVisible = true
                                     takeRealPhoto(context, imageCapture, model, settings)
                                 } else permission.launch(Manifest.permission.CAMERA)
                             },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Default.CameraAlt, null, tint = Teal, modifier = Modifier.size(30.dp))
-                    }
+                    )
                 }
-                // 右：已完成页数堆叠 / 扫描仪图标
-                if (state.draftPages.isNotEmpty()) {
-                    Box(
-                        Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(ComposeColor(0xFF222222))
-                            .clickable { model.finishScanSession() },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Default.DocumentScanner, null, tint = Teal, modifier = Modifier.size(22.dp))
-                        // 红色角标
+                // 右：批量页数（已拍 Teal 高亮 + 红色角标） / 空态拍照
+                Box(
+                    Modifier
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (state.draftPages.isNotEmpty()) Teal else ComposeColor.White.copy(alpha = 0.08f))
+                        .clickable {
+                            if (state.draftPages.isNotEmpty()) {
+                                model.finishScanSession()
+                            } else {
+                                if (hasCameraPermission) {
+                                    flashVisible = true
+                                    takeRealPhoto(context, imageCapture, model, settings)
+                                } else permission.launch(Manifest.permission.CAMERA)
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.DocumentScanner,
+                        null,
+                        tint = if (state.draftPages.isNotEmpty()) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f),
+                        modifier = Modifier.size(22.dp),
+                    )
+                    if (state.draftPages.isNotEmpty()) {
                         Box(
                             Modifier
                                 .align(Alignment.TopEnd)
-                                .offset(x = 4.dp, y = (-4).dp)
-                                .size(16.dp)
+                                .offset(x = 6.dp, y = (-6).dp)
+                                .size(18.dp)
                                 .clip(CircleShape)
-                                .background(ComposeColor(0xFFE53935)),
+                                .background(ComposeColor(0xFFE53935))
+                                .border(1.5.dp, ComposeColor(0xFF0A0A0A), CircleShape),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            Text("${state.draftPages.size}", color = ComposeColor.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
-                    }
-                } else {
-                    Box(
-                        Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(ComposeColor(0xFF222222))
-                            .clickable {
-                                if (hasCameraPermission) {
-                                    flashVisible = true
-                                    takeRealPhoto(context, imageCapture, model, settings)
-                                } else permission.launch(Manifest.permission.CAMERA)
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Default.DocumentScanner, null, tint = ComposeColor.White.copy(alpha = 0.5f), modifier = Modifier.size(22.dp))
                     }
                 }
             }
-            // 第三层：提示文字
-            if (state.draftPages.isNotEmpty()) {
-                Text(
-                    tr(settings, "${state.draftPages.size} pages captured", "已拍摄 ${state.draftPages.size} 页"),
-                    color = ComposeColor.White.copy(alpha = 0.5f),
-                    fontSize = 11.sp,
-                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 4.dp),
-                )
+            // ③ 单页 / 多页 文字切换（快门下方，仅文档模式）
+            if (state.scanMode == ScanMode.Document) {
+                Row(
+                    Modifier.padding(top = 2.dp, bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    listOf(
+                        DocumentCaptureMode.Single to tr(settings, "Single", "单页"),
+                        DocumentCaptureMode.Multi to tr(settings, "Multi", "多页"),
+                    ).forEachIndexed { index, (mode, label) ->
+                        if (index > 0) Box(Modifier.width(1.dp).height(12.dp).background(ComposeColor.White.copy(alpha = 0.25f)))
+                        val selected = mode == state.documentCaptureMode
+                        Text(
+                            label,
+                            Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { model.changeDocumentCaptureMode(mode) }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.4f),
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                }
             } else {
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
             }
+            // ④ 底部提示
+            Text(
+                if (state.draftPages.isNotEmpty()) {
+                    tr(settings, "${state.draftPages.size} pages captured", "已拍摄 ${state.draftPages.size} 页，点击右侧按钮完成")
+                } else {
+                    tr(settings, "Place the document inside the frame", "将文档置于取景框内")
+                },
+                color = ComposeColor.White.copy(alpha = 0.45f),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
         }
     }
     if (settingsOpen) AlertDialog(
