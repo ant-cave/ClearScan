@@ -54,6 +54,12 @@ jobs:
             tail -40 gradle-test.log 2>/dev/null
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          ERRS=$(grep -E "^e: |error: |Unresolved reference|Compilation error" gradle-test.log 2>/dev/null | head -8)
+          if [ -n "$ERRS" ]; then
+            echo "::error::${ERRS//$'\n'/ || }"
+          else
+            echo "::error::$(tail -25 gradle-test.log 2>/dev/null | tr '\n' ' ' | cut -c1-3500)"
+          fi
       - name: Build signed release APK
         env:
           CLEARSCAN_KEYSTORE_PATH: ${{ runner.temp }}/clearscan-release.jks
