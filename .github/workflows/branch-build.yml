@@ -26,7 +26,20 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v4
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --console=plain 2>&1 | tee gradle-test.log
+      - name: Publish failure diagnostics
+        if: failure()
+        run: |
+          {
+            echo "## CI failure diagnostics"
+            echo '```text'
+            grep -nE "^e: |error: |Unresolved reference|Compilation error|FAILED|Caused by|Execution failed for task" gradle-test.log 2>/dev/null | head -100
+            echo "--- tail ---"
+            tail -40 gradle-test.log 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build debug APK
         run: ./gradlew assembleDebug
       - name: Upload APK artifact
