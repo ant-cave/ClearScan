@@ -2572,7 +2572,7 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                 Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        // === 底部面板（CamScanner 风格：模式卡片 → 快门行 → 单/多页 → 提示） ===
+        // === 底部面板（CamScanner 风格：模式芯片+单多页 → 快门行 → 提示） ===
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2580,50 +2580,86 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                 .navigationBarsPadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // ① 模式卡片横排：圆角芯片图标 + 下方文字
+            // ① 顶部控制行：左侧模式芯片（文档/证件/书籍）+ 右侧单页/多页分段开关
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(top = 12.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                    .padding(top = 12.dp, bottom = 6.dp, start = 14.dp, end = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                scanModes.forEach { (mode, label) ->
-                    val selected = mode == state.scanMode
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                if (state.draftPages.isNotEmpty() && mode != state.scanMode) pendingMode = mode else model.changeScanMode(mode)
-                            }
-                            .padding(horizontal = 14.dp, vertical = 4.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(13.dp))
-                                .background(if (selected) Teal else ComposeColor.White.copy(alpha = 0.08f)),
-                            contentAlignment = Alignment.Center,
+                // 模式芯片横排（占满剩余宽度，保持均匀铺开）
+                Row(
+                    Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    scanModes.forEach { (mode, label) ->
+                        val selected = mode == state.scanMode
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    if (state.draftPages.isNotEmpty() && mode != state.scanMode) pendingMode = mode else model.changeScanMode(mode)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 4.dp),
                         ) {
-                            Icon(
-                                when (mode) {
-                                    ScanMode.IdCard -> Icons.Outlined.Badge
-                                    ScanMode.Book -> Icons.Default.AutoStories
-                                    else -> Icons.Default.Description
-                                },
-                                null,
-                                tint = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.75f),
-                                modifier = Modifier.size(22.dp),
+                            Box(
+                                Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(if (selected) Teal else ComposeColor.White.copy(alpha = 0.08f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    when (mode) {
+                                        ScanMode.IdCard -> Icons.Outlined.Badge
+                                        ScanMode.Book -> Icons.Default.AutoStories
+                                        else -> Icons.Default.Description
+                                    },
+                                    null,
+                                    tint = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.75f),
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            Spacer(Modifier.height(5.dp))
+                            Text(
+                                label,
+                                color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f),
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                             )
                         }
-                        Spacer(Modifier.height(5.dp))
-                        Text(
-                            label,
-                            color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f),
-                            fontSize = 11.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        )
+                    }
+                }
+                // 单页 / 多页 分段开关（与模式平级，置于右侧，已从文档模式解耦）
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(ComposeColor.White.copy(alpha = 0.08f))
+                        .padding(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    listOf(
+                        DocumentCaptureMode.Single to tr(settings, "Single", "单页"),
+                        DocumentCaptureMode.Multi to tr(settings, "Multi", "多页"),
+                    ).forEach { (mode, label) ->
+                        val selected = mode == state.documentCaptureMode
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (selected) Teal else ComposeColor.Transparent)
+                                .clickable { model.changeDocumentCaptureMode(mode) }
+                                .padding(horizontal = 12.dp, vertical = 5.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                label,
+                                color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
                     }
                 }
             }
@@ -2708,34 +2744,8 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     }
                 }
             }
-            // ③ 单页 / 多页 文字切换（快门下方，仅文档模式）
-            if (state.scanMode == ScanMode.Document) {
-                Row(
-                    Modifier.padding(top = 2.dp, bottom = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    listOf(
-                        DocumentCaptureMode.Single to tr(settings, "Single", "单页"),
-                        DocumentCaptureMode.Multi to tr(settings, "Multi", "多页"),
-                    ).forEachIndexed { index, (mode, label) ->
-                        if (index > 0) Box(Modifier.width(1.dp).height(12.dp).background(ComposeColor.White.copy(alpha = 0.25f)))
-                        val selected = mode == state.documentCaptureMode
-                        Text(
-                            label,
-                            Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { model.changeDocumentCaptureMode(mode) }
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                            color = if (selected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.4f),
-                            fontSize = 12.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        )
-                    }
-                }
-            } else {
-                Spacer(Modifier.height(12.dp))
-            }
+            // ③ 单页/多页已上移至顶部控制行，此处仅保留间距
+            Spacer(Modifier.height(10.dp))
             // ④ 底部提示
             Text(
                 if (state.draftPages.isNotEmpty()) {
