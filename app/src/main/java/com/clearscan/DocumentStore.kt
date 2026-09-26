@@ -134,7 +134,7 @@ object DocumentStore {
      * copying is idempotent and the legacy table is only dropped at the end.
      * Must be called after the database is open (MIGRATION_2_3 has run).
      */
-    fun migrateLegacyDocuments(context: Context, database: ClearScanDatabase, dao: DocumentDao) {
+    suspend fun migrateLegacyDocuments(context: Context, database: ClearScanDatabase, dao: DocumentDao) {
         val prefs = context.getSharedPreferences("clearscan-settings", Context.MODE_PRIVATE)
         if (prefs.getBoolean(FLAG, false)) return
         runCatching {

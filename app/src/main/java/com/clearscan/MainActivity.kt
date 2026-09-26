@@ -5442,7 +5442,7 @@ fun saveToGallery(context: Context, doc: Document) {
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ClearScan")
         }
-        val uri = context.contentResolver.insert(MediaStore.Images.getContentUri("external"), values)
+        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
         if (uri != null) {
             context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
             saved++
