@@ -25,7 +25,7 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Restore release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.CLEARSCAN_KEYSTORE_BASE64 }}
