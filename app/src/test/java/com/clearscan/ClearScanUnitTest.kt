@@ -25,14 +25,11 @@ class ClearScanUnitTest {
         val settings = AppSettings()
         assertEquals("Auto", settings.language)
         assertEquals("System", settings.theme)
-        assertEquals("Internal Storage", settings.defaultSavePath)
         assertFalse(settings.loggedIn)
-        assertTrue(settings.passwordMap.isEmpty())
     }
 
     @Test
     fun mimeTypeFor_supportsConvertedImageFormats() {
-        assertEquals("application/pdf", mimeTypeFor("PDF"))
         assertEquals("image/png", mimeTypeFor("PNG"))
         assertEquals("image/webp", mimeTypeFor("WEBP"))
         assertEquals("image/bmp", mimeTypeFor("BMP"))
@@ -138,7 +135,7 @@ class ClearScanUnitTest {
     fun scanModes_haveSeparateBusinessIdentities() {
         assertEquals(PageDetectionProfile.IdCard, detectionProfileFor(ScanMode.IdCard))
         assertEquals(PageDetectionProfile.Document, detectionProfileFor(ScanMode.Book))
-        assertEquals(PageDetectionProfile.Document, detectionProfileFor(ScanMode.Barcode))
+        assertEquals(PageDetectionProfile.Document, detectionProfileFor(ScanMode.IdCard))
     }
 
     @Test

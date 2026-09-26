@@ -30,11 +30,9 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
-import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.print.PrintAttributes
 import android.print.PrintManager
@@ -144,9 +142,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Save
@@ -154,7 +150,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -266,9 +261,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.common.InputImage
-import com.google.android.gms.tasks.Tasks
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.hypot
@@ -368,27 +360,21 @@ fun decodeCropPoints(value: String): List<Offset> = value.split(';').mapNotNull 
 }.takeIf { it.size == 4 } ?: defaultCropPoints()
 
 private fun requiredTypesFor(tool: String?): Set<String> = when (tool) {
-    "PDF to Image", "PDF Edit", "Merge PDF", "Split PDF", "Compress PDF" -> setOf("PDF")
-    "Image to PDF", "Image Format Converter" -> setOf("JPG", "JPEG", "PNG", "WEBP", "BMP", "IMAGE")
-    "Watermark", "Add Signature" -> setOf("PDF", "JPG", "JPEG", "PNG", "WEBP", "BMP", "IMAGE")
+    "Image Format Converter" -> setOf("JPEG", "JPG", "PNG", "WEBP", "BMP")
     else -> emptySet()
 }
 
-private fun minSelectionFor(tool: String?): Int = if (tool == "Merge PDF") 2 else 1
+private fun minSelectionFor(tool: String?): Int = 1
 
-private fun maxSelectionFor(tool: String?): Int = if (tool == "Merge PDF") Int.MAX_VALUE else 1
+private fun maxSelectionFor(tool: String?): Int = 1
 
 private fun defaultToolOption(tool: String): String = when (tool) {
-    "Split PDF" -> "All pages"
-    "Compress PDF" -> "Medium"
     "Image Format Converter" -> "PNG"
     else -> "Standard"
 }
 
 private fun toolOptions(tool: String?): List<String> = when (tool) {
-    "Split PDF" -> listOf("All pages", "First page")
-    "Compress PDF" -> listOf("Low", "Medium", "High")
-    "Image Format Converter" -> listOf("JPEG", "PNG", "WEBP", "BMP", "PDF")
+    "Image Format Converter" -> listOf("JPEG", "PNG", "WEBP", "BMP")
     else -> emptyList()
 }
 
@@ -406,16 +392,7 @@ private fun selectionHint(tool: String, settings: AppSettings): String {
 }
 
 private fun toolLabel(tool: String, settings: AppSettings): String = when (tool) {
-    "Merge PDF" -> tr(settings, "Merge PDF", "合并 PDF")
-    "Split PDF" -> tr(settings, "Split PDF", "拆分 PDF")
-    "Compress PDF" -> tr(settings, "Compress PDF", "压缩 PDF")
-    "PDF to Image" -> tr(settings, "PDF to Image", "PDF 转图片")
-    "Image to PDF" -> tr(settings, "Image to PDF", "图片转 PDF")
     "Image Format Converter" -> tr(settings, "Image Format Converter", "图片格式转换")
-    "PDF Edit" -> tr(settings, "PDF Edit", "PDF 编辑")
-    "Watermark" -> tr(settings, "Watermark", "添加水印")
-    "Add Signature" -> tr(settings, "Add Signature", "添加签名")
-    "QR Code Scan" -> tr(settings, "QR Code Scan", "二维码扫描")
     "ID Card Scan" -> tr(settings, "ID Card Scan", "证件扫描")
     "Translate" -> tr(settings, "Translate", "翻译")
     else -> tool
@@ -460,8 +437,6 @@ data class AppSettings(
     val loggedIn: Boolean = false,
     val accountName: String = "Guest",
     val accountEmail: String = "",
-    val passwordMap: Map<Long, String> = emptyMap(),
-    val defaultSavePath: String = "Internal Storage",
     val defaultFilter: String = "B&W",
     val autoCheckUpdates: Boolean = true,
     val autoDownloadUpdates: Boolean = true,
@@ -490,7 +465,7 @@ fun tabLabel(settings: AppSettings, tab: Tab): String = when (tab) {
 }
 
 enum class Screen {
-    Shell, Camera, Crop, Edit, Filter, Adjust, Save, Detail, Share, ToolSelect, WatermarkEditor, SignatureEditor, Translate, Settings, Account, Help, About, Legal, AppLogs
+    Shell, Camera, Crop, Edit, Filter, Adjust, Save, Detail, Share, ToolSelect, Translate, Settings, Account, Help, About, Legal, AppLogs
 }
 
 enum class EditTab(val title: String, val icon: ImageVector) {
@@ -540,7 +515,6 @@ data class UiState(
     val scanSessionId: Long? = null,
     val draftPages: List<DraftScanPageEntity> = emptyList(),
     val currentDraftIndex: Int = 0,
-    val codeResult: CodeScanResult? = null,
     val updateInfo: UpdateInfo? = null,
     val updateDownload: UpdateDownloadState = UpdateDownloadState(),
     val checkingUpdate: Boolean = false,
@@ -565,9 +539,19 @@ data class UiState(
 
 class ClearScanViewModel(application: Application) : AndroidViewModel(application) {
     private val database = Room.databaseBuilder(application, ClearScanDatabase::class.java, "clearscan.db")
-        .addMigrations(ClearScanDatabase.MIGRATION_1_2)
+        .addMigrations(ClearScanDatabase.MIGRATION_1_2, ClearScanDatabase.MIGRATION_2_3)
         .build()
     private val dao = database.documentDao()
+
+    init {
+        // Touch the database first so MIGRATION_2_3 (rename to documents_legacy)
+        // has run, then copy legacy image documents into the new per-document
+        // folders. PDF documents are dropped. Runs once, guarded by a flag.
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { database.openHelper.writableDatabase }
+            DocumentStore.migrateLegacyDocuments(application, database, dao)
+        }
+    }
     private val prefs = application.getSharedPreferences("clearscan-settings", Context.MODE_PRIVATE)
     private val settingsRepository = SettingsRepository(application)
     private val settingsFlow = MutableStateFlow(loadSettings())
@@ -678,10 +662,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         startScanMode(ScanMode.Document)
     }
 
-    fun openQrScanner() {
-        startScanMode(ScanMode.QrCode)
-    }
-
     fun startScanMode(mode: ScanMode) {
         AppLogger.i("Scan", "Open camera mode=${mode.name}")
         val sessionId = if (mode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) System.currentTimeMillis() else null
@@ -713,7 +693,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         }
         val previousSessionId = state.scanSessionId
         val sessionId = if (mode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) System.currentTimeMillis() else null
-        navFlow.value = state.copy(scanMode = mode, scanSessionId = sessionId, codeResult = null, liveDocumentFrame = null, captureMessage = null)
+        navFlow.value = state.copy(scanMode = mode, scanSessionId = sessionId, liveDocumentFrame = null, captureMessage = null)
         viewModelScope.launch(Dispatchers.IO) {
             if (previousSessionId != null && previousSessionId != sessionId) dao.deleteSession(previousSessionId)
             if (sessionId != null) dao.upsertSession(ScanSessionEntity(sessionId, mode.name, sessionId, System.currentTimeMillis()))
@@ -744,16 +724,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         val state = navFlow.value
         if (state.screen != Screen.Camera || state.scanMode !in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) return
         navFlow.value = state.copy(liveDocumentFrame = frame)
-    }
-
-    fun onCodeDetected(result: CodeScanResult) {
-        if (navFlow.value.codeResult?.rawValue == result.rawValue) return
-        AppLogger.i("CodeScan", "Detected mode=${navFlow.value.scanMode} format=${result.format} type=${result.valueType}")
-        navFlow.value = navFlow.value.copy(codeResult = result, captureMessage = null)
-    }
-
-    fun clearCodeResult() {
-        navFlow.value = navFlow.value.copy(codeResult = null)
     }
 
     fun back() {
@@ -821,14 +791,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             if (bitmap == null) {
                 AppLogger.w("Camera", "Photo decode failed")
                 navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Photo capture failed. Please try again.", "照片拍摄失败，请重试"))
-            } else if (navFlow.value.scanMode in listOf(ScanMode.QrCode, ScanMode.Barcode)) {
-                val result = withContext(Dispatchers.Default) { ImageProcessor.scanQr(bitmap) }
-                AppLogger.i("CodeScan", "${navFlow.value.scanMode} result: ${result ?: "none"}")
-                replace(Screen.Camera) {
-                    copy(
-                    captureMessage = result ?: tr(settingsFlow.value, "No matching code found. Try again.", "未识别到对应编码，请重试"),
-                    )
-                }
             } else {
                 AppLogger.i(
                     "Scan",
@@ -1312,59 +1274,83 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             navFlow.value = navFlow.value.copy(busy = true)
             val saved = withContext(Dispatchers.IO) {
                 val id = System.currentTimeMillis()
-                val files = saveDirectory()
-                val sessionBitmaps = stateAtSave.draftPages.mapNotNull { page ->
-                    // Storage is image-only: pages that never passed the crop/filter step fall
-                    // back to the unrotated original, so replay the persisted rotation there.
-                    ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 4096)
-                        ?.let { if (page.processedPath.isBlank() && page.rotation != 0) ImageProcessor.rotateQuarters(it, page.rotation) else it }
-                }.toMutableList()
-                val pageBitmaps = sessionBitmaps.ifEmpty { mutableListOf(bitmap) }
-                val imageFile = File(files, "$id-page.jpg")
-                ImageProcessor.writeJpeg(pageBitmaps.first(), imageFile, quality)
-                val export = File(files, "$id.jpg").also { ImageProcessor.writeJpeg(pageBitmaps.first(), it, quality) }
-                val doc = Document(
+                val dir = DocumentStore.documentDir(getApplication(), id).apply { mkdirs() }
+                val drafts = stateAtSave.draftPages
+                val storedPages = mutableListOf<StoredPage>()
+                for (index in drafts.indices) {
+                    val draft = drafts[index]
+                    val pageId = draft.id
+                    // Original capture: move the draft original into the document folder.
+                    val original = File(dir, "$pageId-original.jpg")
+                    val draftOriginal = File(draft.originalPath)
+                    if (!draftOriginal.exists()) continue
+                    draftOriginal.copyTo(original, overwrite = true)
+                    // Processed result: prefer the persisted crop/filter output.
+                    val processed = File(dir, "$pageId-processed.jpg")
+                    val draftProcessed = draft.processedPath.takeIf { it.isNotBlank() }?.let(::File)
+                    if (draftProcessed != null && draftProcessed.exists()) {
+                        draftProcessed.copyTo(processed, overwrite = true)
+                    } else {
+                        // Page never passed the crop step: apply the saved rotation to the
+                        // original so the processed image matches the draft preview.
+                        val rotated = ImageProcessor.readBitmap(original.absolutePath, 4096)
+                            ?.let { if (draft.rotation != 0) ImageProcessor.rotateQuarters(it, draft.rotation) else it }
+                            ?: bitmap
+                        ImageProcessor.writeJpeg(rotated, processed, 90)
+                    }
+                    val thumb = File(dir, "$pageId-thumb.jpg")
+                    val thumbBitmap = ImageProcessor.readBitmap(processed.absolutePath, 640)
+                    if (thumbBitmap != null) ImageProcessor.writeJpeg(thumbBitmap, thumb, 76) else processed.copyTo(thumb, overwrite = true)
+                    val dims = ImageProcessor.readBitmap(processed.absolutePath, 64)
+                    storedPages += StoredPage(
+                        id = pageId,
+                        pageIndex = index,
+                        originalPath = original.absolutePath,
+                        processedPath = processed.absolutePath,
+                        thumbPath = thumb.absolutePath,
+                        cropPoints = draft.cropPoints,
+                        filter = stateAtSave.selectedFilter,
+                        brightness = 0f,
+                        contrast = 1f,
+                        saturation = 1f,
+                        rotation = draft.rotation,
+                        confidence = draft.confidence,
+                        width = dims?.width ?: 0,
+                        height = dims?.height ?: 0,
+                    )
+                }
+                if (storedPages.isEmpty()) return@withContext null
+                // Fix heights cheaply: reuse processed bitmap dims already computed above.
+                val meta = DocumentMeta(
                     id = id,
                     title = title.ifBlank { "Untitled Scan" },
-                    type = "JPG",
                     createdAt = id,
-                    sizeBytes = export.length(),
-                    pageCount = pageBitmaps.size,
-                    thumbnailPath = imageFile.absolutePath,
-                    exportPath = export.absolutePath,
+                    scanMode = stateAtSave.scanMode.name,
+                    pages = storedPages,
+                )
+                DocumentStore.writeMeta(getApplication(), meta)
+                val doc = Document(
+                    id = id,
+                    title = meta.title,
+                    createdAt = id,
+                    pageCount = storedPages.size,
+                    thumbnailPath = meta.firstThumbPath.orEmpty(),
+                    sizeBytes = DocumentStore.directorySize(dir),
                     folderId = stateAtSave.currentFolderId,
                     scanMode = stateAtSave.scanMode.name,
                 )
                 dao.upsert(doc)
-                pageBitmaps.forEachIndexed { index, pageBitmap ->
-                    val pageFile = File(files, "$id-page-$index.jpg")
-                    ImageProcessor.writeJpeg(pageBitmap, pageFile, quality)
-                    val draft = stateAtSave.draftPages.getOrNull(index)
-                    dao.upsertPage(
-                        ScanPage(
-                            id = id + index,
-                            documentId = id,
-                            originalPath = draft?.originalPath ?: pageFile.absolutePath,
-                            processedPath = pageFile.absolutePath,
-                            cropPoints = draft?.cropPoints ?: "auto",
-                            filter = "Auto",
-                            brightness = 0f,
-                            contrast = 1f,
-                            saturation = 1f,
-                            rotation = draft?.rotation ?: 0,
-                            pageIndex = index,
-                            sourceType = stateAtSave.scanMode.name,
-                            originalWidth = pageBitmap.width,
-                            originalHeight = pageBitmap.height,
-                        )
-                    )
-                }
                 stateAtSave.scanSessionId?.let { sessionId ->
                     dao.deleteDraftPages(sessionId)
                     dao.deleteSession(sessionId)
+                    File(getApplication<Application>().filesDir, "scan_sessions/$sessionId").deleteRecursively()
                 }
-                AppLogger.i("Document", "Saved document id=$id export=${export.absolutePath} size=${export.length()}")
+                AppLogger.i("Document", "Saved document id=$id pages=${storedPages.size} size=${doc.sizeBytes}")
                 doc
+            }
+            if (saved == null) {
+                navFlow.value = navFlow.value.copy(busy = false, captureMessage = tr(settingsFlow.value, "Unable to save. Please try again.", "保存失败，请重试"))
+                return@launch
             }
             navFlow.value = navFlow.value.copy(
                 screen = Screen.Detail,
@@ -1380,7 +1366,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun openDocument(document: Document) {
-        AppLogger.i("Document", "Open document id=${document.id} title=${document.title} type=${document.type}")
+        AppLogger.i("Document", "Open document id=${document.id} title=${document.title}")
         val bitmap = ImageProcessor.readBitmap(document.thumbnailPath, 3072)
         go(Screen.Detail) {
             copy(
@@ -1394,36 +1380,16 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     suspend fun loadDocumentPages(document: Document): List<Bitmap> = withContext(Dispatchers.IO) {
-        if (document.type == "PDF") {
-            ImageProcessor.renderPdfPages(document.exportPath, maxPages = 100)
-        } else {
-            val stored = dao.pages(document.id).mapNotNull { page -> ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 3072) }
-            stored.ifEmpty { listOfNotNull(ImageProcessor.readBitmap(document.exportPath, 3072) ?: ImageProcessor.readBitmap(document.thumbnailPath, 3072)) }
-        }
+        val meta = DocumentStore.readMeta(getApplication(), document.id)
+        val stored = meta?.pages.orEmpty()
+            .sortedBy { it.pageIndex }
+            .mapNotNull { page -> ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 3072) }
+        stored.ifEmpty { listOfNotNull(ImageProcessor.readBitmap(document.thumbnailPath, 3072)) }
     }
 
     fun shareSelected() {
         AppLogger.i("Share", "Open share for document ${navFlow.value.selected?.id}")
         go(Screen.Share)
-    }
-
-    /** Exports a saved image-only document to a user-chosen PDF file (no PDF stored in the library). */
-    fun exportDocumentAsPdf(document: Document, uri: android.net.Uri) {
-        viewModelScope.launch {
-            val pages = loadDocumentPages(document)
-            if (pages.isEmpty()) return@launch
-            withContext(Dispatchers.IO) {
-                val app = getApplication<Application>()
-                val tmp = File(app.cacheDir, "export-${System.currentTimeMillis()}.pdf")
-                runCatching { ImageProcessor.writePdf(pages, tmp) }
-                    .onSuccess {
-                        runCatching {
-                            app.contentResolver.openOutputStream(uri)?.use { out -> tmp.inputStream().use { it.copyTo(out) } }
-                        }
-                    }
-                tmp.delete()
-            }
-        }
     }
 
     fun renameSelected(title: String) {
@@ -1440,6 +1406,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         AppLogger.i("Document", "Delete document id=${doc.id} title=${doc.title}")
         viewModelScope.launch {
             dao.deleteDocument(doc.id)
+            withContext(Dispatchers.IO) { DocumentStore.deleteDocument(getApplication(), doc.id) }
             replace(Screen.Shell) { copy(selected = null, tab = Tab.Docs, backStack = emptyList()) }
         }
     }
@@ -1457,7 +1424,10 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         val ids = navFlow.value.selectedDocumentIds
         if (ids.isEmpty()) return
         viewModelScope.launch {
-            for (id in ids) dao.deleteDocument(id)
+            ids.forEach { id ->
+                dao.deleteDocument(id)
+                DocumentStore.deleteDocument(getApplication(), id)
+            }
             clearDocumentSelection()
             replace(Screen.Shell) { copy(tab = Tab.Docs, backStack = emptyList()) }
         }
@@ -1499,7 +1469,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun updateSettings(settings: AppSettings) {
-        AppLogger.i("Settings", "Update settings language=${settings.language} theme=${settings.theme} path=${settings.defaultSavePath}")
+        AppLogger.i("Settings", "Update settings language=${settings.language} theme=${settings.theme}")
         settingsFlow.value = settings
         saveSettings(settings)
         GitHubUpdateRepository.schedule(getApplication(), settings.autoCheckUpdates, settings.wifiOnlyUpdates)
@@ -1564,20 +1534,10 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         navFlow.value = navFlow.value.copy(screen = Screen.Shell, tab = Tab.Me, selected = null, backStack = emptyList(), captureMessage = tr(settingsFlow.value, "Logged out", "已退出登录"))
     }
 
-    fun setDocumentPassword(documentId: Long, password: String) {
-        AppLogger.i("Security", if (password.isBlank()) "Remove password for document $documentId" else "Set password for document $documentId")
-        val current = settingsFlow.value.passwordMap
-        settingsFlow.value = settingsFlow.value.copy(passwordMap = if (password.isBlank()) current - documentId else current + (documentId to password))
-        saveSettings(settingsFlow.value)
-        navFlow.value = navFlow.value.copy(captureMessage = if (password.isBlank()) tr(settingsFlow.value, "Password removed", "密码已移除") else tr(settingsFlow.value, "Password set", "密码已设置"))
-    }
-
     fun runTool(name: String) {
         AppLogger.i("Tool", "Run tool entry $name")
         when (name) {
             "ID Card Scan" -> startScanMode(ScanMode.IdCard)
-            "QR Code Scan" -> openQrScanner()
-            "Barcode Scan" -> startScanMode(ScanMode.Barcode)
             "Translate" -> openTranslate()
             else -> beginTool(name)
         }
@@ -1817,15 +1777,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             navFlow.value = state.copy(captureMessage = selectionHint(tool, settingsFlow.value))
             return
         }
-        if (tool == "Watermark" || tool == "Add Signature") {
-            val document = allDocuments.firstOrNull { it.id in selectedIds }
-            if (document != null) {
-                replace(if (tool == "Watermark") Screen.WatermarkEditor else Screen.SignatureEditor) {
-                    copy(selected = document, busy = false, captureMessage = null)
-                }
-            }
-            return
-        }
         viewModelScope.launch {
             val selected = allDocuments.filter { it.id in selectedIds }
             if (selected.size < minSelectionFor(tool)) {
@@ -1838,7 +1789,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 runToolOperation(tool, selected, navFlow.value.toolOption)
             }
             if (result != null) {
-                AppLogger.i("Tool", "$tool complete outputId=${result.id} path=${result.exportPath}")
+                AppLogger.i("Tool", "$tool complete outputId=${result.id}")
                 replace(Screen.Detail) {
                     copy(
                         busy = false,
@@ -1858,150 +1809,84 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun applyWatermark(document: Document, options: WatermarkOptions) {
-        viewModelScope.launch {
-            navFlow.value = navFlow.value.copy(busy = true)
-            val result = withContext(Dispatchers.IO) {
-                val pages = loadDocumentPages(document)
-                val output = pages.mapIndexed { index, bitmap -> if (index == 0 || options.applyAllPages) OverlayRenderer.watermark(bitmap, options) else bitmap }
-                if (output.isEmpty()) null else writeDocumentFiles("${document.title} - Watermark", document.type, output.first(), "High", output.size, if (document.type == "PDF") output else null)
-            }
-            finishOverlayResult(result, "Watermark")
-        }
-    }
-
-    fun applySignature(document: Document, options: SignatureOptions) {
-        viewModelScope.launch {
-            navFlow.value = navFlow.value.copy(busy = true)
-            val result = withContext(Dispatchers.IO) {
-                val pages = loadDocumentPages(document)
-                val output = pages.mapIndexed { index, bitmap -> if (index == 0 || options.applyAllPages) OverlayRenderer.signature(bitmap, options) else bitmap }
-                if (output.isEmpty()) null else writeDocumentFiles("${document.title} - Signed", document.type, output.first(), "High", output.size, if (document.type == "PDF") output else null)
-            }
-            finishOverlayResult(result, "Signature")
-        }
-    }
-
-    private fun finishOverlayResult(result: Document?, label: String) {
-        if (result == null) {
-            navFlow.value = navFlow.value.copy(busy = false, captureMessage = tr(settingsFlow.value, "$label failed", "操作失败"))
-        } else {
-            replace(Screen.Detail) { copy(busy = false, selected = result, tab = Tab.Docs, activeTool = null, selectedToolIds = emptySet()) }
-        }
-    }
-
     private suspend fun runToolOperation(tool: String, selected: List<Document>, option: String): Document? {
         val first = selected.firstOrNull() ?: return null
         return when (tool) {
-            "PDF Edit" -> first
-            "PDF to Image" -> {
-                val bitmap = ImageProcessor.renderPdfFirstPage(first.exportPath) ?: return null
-                writeDocumentFiles("Image from ${first.title}", "JPG", bitmap, "High")
-            }
-            "Image to PDF" -> {
-                val bitmap = ImageProcessor.readBitmap(first.exportPath) ?: ImageProcessor.readBitmap(first.thumbnailPath) ?: return null
-                writeDocumentFiles("${first.title} PDF", "PDF", bitmap, "High")
-            }
             "Image Format Converter" -> {
-                val bitmap = ImageProcessor.readBitmap(first.exportPath) ?: ImageProcessor.readBitmap(first.thumbnailPath) ?: return null
+                val meta = DocumentStore.readMeta(getApplication(), first.id) ?: return null
+                val source = meta.pages.firstOrNull()?.let { ImageProcessor.readBitmap(it.processedPath.ifBlank { it.originalPath }) } ?: return null
                 val targetType = when (option.uppercase()) {
-                    "JPG", "JPEG" -> "JPEG"
                     "WEBP" -> "WEBP"
                     "BMP" -> "BMP"
-                    "PDF" -> "PDF"
-                    else -> "PNG"
+                    "PNG" -> "PNG"
+                    else -> "JPEG"
                 }
-                writeDocumentFiles("${first.title} - $targetType", targetType, bitmap, "High")
-            }
-            "Merge PDF" -> {
-                val pages = selected.flatMap { doc -> ImageProcessor.documentPages(doc) }
-                if (pages.isEmpty()) return null
-                writeDocumentFiles("Merged PDF", "PDF", pages.first(), "Medium", pageCount = pages.size, pdfPages = pages)
-            }
-            "Split PDF" -> {
-                val pages = ImageProcessor.renderPdfPages(first.exportPath, maxPages = if (option == "First page") 1 else Int.MAX_VALUE)
-                if (pages.isEmpty()) return null
-                writeDocumentFiles("${first.title} - Split", "PDF", pages.first(), "Medium", pageCount = pages.size, pdfPages = pages)
-            }
-            "Compress PDF" -> {
-                val pages = ImageProcessor.renderPdfPages(first.exportPath).ifEmpty { return null }
-                val quality = when (option) {
-                    "Low" -> "Low"
-                    "High" -> "High"
-                    else -> "Medium"
-                }
-                val compressed = pages.map { ImageProcessor.downsampleForPdf(it, option) }
-                writeDocumentFiles("${first.title} - Compressed", "PDF", compressed.first(), quality, pageCount = compressed.size, pdfPages = compressed)
-            }
-            "Watermark" -> {
-                val pages = ImageProcessor.documentPages(first).ifEmpty { return null }
-                val watermarked = pages.map { ImageProcessor.watermark(it, "ClearScan") }
-                writeDocumentFiles("${first.title} - Watermark", first.type, watermarked.first(), "High", pageCount = watermarked.size, pdfPages = if (first.type == "PDF") watermarked else null)
-            }
-            "Add Signature" -> {
-                val pages = ImageProcessor.documentPages(first).ifEmpty { return null }
-                val signed = pages.mapIndexed { index, bitmap -> if (index == 0) ImageProcessor.addSignature(bitmap) else bitmap }
-                writeDocumentFiles("${first.title} - Signed", first.type, signed.first(), "High", pageCount = signed.size, pdfPages = if (first.type == "PDF") signed else null)
+                writeDocumentFiles("${first.title} - $targetType", targetType, source, "High")
             }
             else -> null
         }
     }
 
-    private suspend fun writeDocumentFiles(
-        title: String,
-        type: String,
-        bitmap: Bitmap,
-        quality: String,
-        pageCount: Int = 1,
-        pdfPages: List<Bitmap>? = null,
-    ): Document {
+    /** Persists a single-image document (format-converter output) in the new structure. */
+    private suspend fun writeDocumentFiles(title: String, type: String, bitmap: Bitmap, quality: String): Document {
         val id = System.currentTimeMillis()
-        val files = saveDirectory()
-        val imageFile = File(files, "$id-page.jpg")
-        ImageProcessor.writeJpeg(bitmap, imageFile, quality)
-        val normalizedType = when (type.uppercase()) {
-            "JPG" -> "JPEG"
-            else -> type.uppercase()
+        val dir = DocumentStore.documentDir(getApplication(), id).apply { mkdirs() }
+        val original = File(dir, "$id-original.jpg")
+        val processed = when (type.uppercase()) {
+            "PNG" -> File(dir, "$id-processed.png").also { ImageProcessor.writePng(bitmap, it) }
+            "WEBP" -> File(dir, "$id-processed.webp").also { ImageProcessor.writeWebp(bitmap, it) }
+            "BMP" -> File(dir, "$id-processed.bmp").also { ImageProcessor.writeBmp(bitmap, it) }
+            else -> File(dir, "$id-processed.jpg").also { ImageProcessor.writeJpeg(bitmap, it, quality) }
         }
-        val export = when (normalizedType) {
-            "PDF" -> File(files, "$id.pdf").also { ImageProcessor.writePdf(pdfPages ?: listOf(bitmap), it) }
-            "PNG" -> File(files, "$id.png").also { ImageProcessor.writePng(bitmap, it) }
-            "WEBP" -> File(files, "$id.webp").also { ImageProcessor.writeWebp(bitmap, it) }
-            "BMP" -> File(files, "$id.bmp").also { ImageProcessor.writeBmp(bitmap, it) }
-            else -> File(files, "$id.jpg").also { ImageProcessor.writeJpeg(bitmap, it, quality) }
-        }
-        val doc = Document(id, title, normalizedType, id, export.length(), pageCount, imageFile.absolutePath, export.absolutePath)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, original.outputStream())
+        val thumb = File(dir, "$id-thumb.jpg")
+        ImageProcessor.readBitmap(processed.absolutePath, 640)
+            ?.let { ImageProcessor.writeJpeg(it, thumb, 76) }
+            ?: bitmap.compress(Bitmap.CompressFormat.JPEG, 76, thumb.outputStream())
+        val meta = DocumentMeta(
+            id = id,
+            title = title,
+            createdAt = id,
+            scanMode = ScanMode.Document.name,
+            pages = listOf(
+                StoredPage(
+                    id = id,
+                    pageIndex = 0,
+                    originalPath = original.absolutePath,
+                    processedPath = processed.absolutePath,
+                    thumbPath = thumb.absolutePath,
+                    cropPoints = "0,0;1,0;1,1;0,1",
+                    filter = "None",
+                    brightness = 0f,
+                    contrast = 1f,
+                    saturation = 1f,
+                    rotation = 0,
+                    confidence = 0f,
+                    width = bitmap.width,
+                    height = bitmap.height,
+                ),
+            ),
+        )
+        DocumentStore.writeMeta(getApplication(), meta)
+        val doc = Document(
+            id = id,
+            title = title,
+            createdAt = id,
+            pageCount = 1,
+            thumbnailPath = thumb.absolutePath,
+            sizeBytes = DocumentStore.directorySize(dir),
+        )
         dao.upsert(doc)
-        dao.upsertPage(ScanPage(id, id, imageFile.absolutePath, imageFile.absolutePath, "auto", "Auto", 0f, 1f, 1f, 0))
         return doc
     }
 
-    private fun saveDirectory(): File {
-        val app = getApplication<Application>()
-        return if (settingsFlow.value.defaultSavePath == "Documents") {
-            app.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: app.filesDir
-        } else {
-            app.filesDir
-        }
-    }
-
     private fun loadSettings(): AppSettings {
-        val passwords = prefs.getString("passwords", "").orEmpty()
-            .split("|")
-            .mapNotNull { item ->
-                val parts = item.split(":", limit = 2)
-                parts.firstOrNull()?.toLongOrNull()?.let { id -> id to parts.getOrElse(1) { "" } }
-            }
-            .filter { it.second.isNotBlank() }
-            .toMap()
         return AppSettings(
             language = prefs.getString("language", "Auto") ?: "Auto",
             theme = prefs.getString("theme", "System") ?: "System",
             loggedIn = prefs.getBoolean("loggedIn", false),
             accountName = prefs.getString("accountName", "Guest") ?: "Guest",
             accountEmail = prefs.getString("accountEmail", "") ?: "",
-            passwordMap = passwords,
-            defaultSavePath = prefs.getString("defaultSavePath", "Internal Storage") ?: "Internal Storage",
             // Sanitize: a stored default may name a filter that no longer exists.
             defaultFilter = (prefs.getString("defaultFilter", "B&W") ?: "B&W").takeIf { it in DocumentFilters } ?: "B&W",
             autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
@@ -2020,7 +1905,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             .putBoolean("loggedIn", settings.loggedIn)
             .putString("accountName", settings.accountName)
             .putString("accountEmail", settings.accountEmail)
-            .putString("defaultSavePath", settings.defaultSavePath)
             .putString("defaultFilter", settings.defaultFilter)
             .putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
             .putBoolean("autoDownloadUpdates", settings.autoDownloadUpdates)
@@ -2028,7 +1912,6 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             .putBoolean("cameraGrid", settings.cameraGrid)
             .putBoolean("cameraEnhance", settings.cameraEnhance)
             .putString("cameraResolution", settings.cameraResolution)
-            .putString("passwords", settings.passwordMap.entries.joinToString("|") { "${it.key}:${it.value}" })
             .apply()
         viewModelScope.launch(Dispatchers.IO) { settingsRepository.save(settings) }
     }
@@ -2036,15 +1919,54 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun seedIfEmpty() {
         if (ui.value.documents.isNotEmpty()) return
         val context = getApplication<Application>()
-        val names = listOf("Contract Agreement" to "PDF", "Lecture Notes" to "PDF", "Invoice_0528" to "PDF", "ID Card" to "JPG", "Book Summary" to "PDF", "Whiteboard Notes" to "JPG")
-        names.forEachIndexed { index, pair ->
+        val names = listOf("Contract Agreement", "Lecture Notes", "Invoice_0528", "ID Card", "Book Summary", "Whiteboard Notes")
+        names.forEachIndexed { index, name ->
             val id = System.currentTimeMillis() - index * 86_400_000L
-            val bitmap = ImageProcessor.sampleDocumentBitmap(pair.first)
-            val thumb = File(context.filesDir, "$id-seed.jpg")
-            ImageProcessor.writeJpeg(bitmap, thumb, "Medium")
-            val export = File(context.filesDir, if (pair.second == "PDF") "$id-seed.pdf" else "$id-seed-out.jpg")
-            if (pair.second == "PDF") ImageProcessor.writePdf(bitmap, export) else ImageProcessor.writeJpeg(bitmap, export, "Medium")
-            dao.upsert(Document(id, pair.first, pair.second, id, export.length(), 1, thumb.absolutePath, export.absolutePath))
+            val dir = DocumentStore.documentDir(context, id).apply { mkdirs() }
+            val bitmap = ImageProcessor.sampleDocumentBitmap(name)
+            val original = File(dir, "$id-original.jpg")
+            ImageProcessor.writeJpeg(bitmap, original, "Medium")
+            val processed = File(dir, "$id-processed.jpg")
+            ImageProcessor.writeJpeg(bitmap, processed, "Medium")
+            val thumb = File(dir, "$id-thumb.jpg")
+            ImageProcessor.writeJpeg(ImageProcessor.previewBitmap(bitmap, 640) ?: bitmap, thumb, "Medium")
+            DocumentStore.writeMeta(
+                context,
+                DocumentMeta(
+                    id = id,
+                    title = name,
+                    createdAt = id,
+                    scanMode = ScanMode.Document.name,
+                    pages = listOf(
+                        StoredPage(
+                            id = id,
+                            pageIndex = 0,
+                            originalPath = original.absolutePath,
+                            processedPath = processed.absolutePath,
+                            thumbPath = thumb.absolutePath,
+                            cropPoints = "0,0;1,0;1,1;0,1",
+                            filter = "None",
+                            brightness = 0f,
+                            contrast = 1f,
+                            saturation = 1f,
+                            rotation = 0,
+                            confidence = 0f,
+                            width = bitmap.width,
+                            height = bitmap.height,
+                        ),
+                    ),
+                ),
+            )
+            dao.upsert(
+                Document(
+                    id = id,
+                    title = name,
+                    createdAt = id,
+                    pageCount = 1,
+                    thumbnailPath = thumb.absolutePath,
+                    sizeBytes = DocumentStore.directorySize(dir),
+                ),
+            )
         }
     }
 }
@@ -2097,8 +2019,6 @@ fun ClearScanApp(model: ClearScanViewModel) {
                         Screen.Detail -> DetailScreen(state, model)
                         Screen.Share -> ShareScreen(state, model)
                         Screen.ToolSelect -> ToolSelectScreen(state, model)
-                        Screen.WatermarkEditor -> WatermarkEditorScreen(state, model)
-                        Screen.SignatureEditor -> SignatureEditorScreen(state, model)
                         Screen.Translate -> TranslateScreen(state, model)
                         Screen.Settings -> SettingsScreen(state, model)
                         Screen.Account -> AccountScreen(state, model)
@@ -2335,7 +2255,6 @@ fun DocumentRow(document: Document, model: ClearScanViewModel, selected: Boolean
             Spacer(Modifier.height(8.dp))
             Text(formatDate(document.createdAt), color = Muted, fontSize = 15.sp)
         }
-        Text(document.type, color = if (document.type == "PDF") ComposeColor(0xFFFF6258) else ComposeColor(0xFF36B36A), modifier = Modifier.border(1.dp, if (document.type == "PDF") ComposeColor(0xFFFF6258) else ComposeColor(0xFF36B36A), RoundedCornerShape(5.dp)).padding(horizontal = 8.dp, vertical = 4.dp), fontWeight = FontWeight.Bold)
     }
 }
 
@@ -2517,13 +2436,9 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
         }
     }
     val analyzer = remember(state.scanMode) {
-        when (state.scanMode) {
-            ScanMode.QrCode, ScanMode.Barcode -> BarcodeAnalyzer(state.scanMode, model::onCodeDetected)
-            ScanMode.Document, ScanMode.Book, ScanMode.IdCard -> DocumentFrameAnalyzer(detectionProfileFor(state.scanMode), model::onLiveDocumentFrame)
-        }
+        DocumentFrameAnalyzer(detectionProfileFor(state.scanMode), model::onLiveDocumentFrame)
     }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-    DisposableEffect(analyzer) { onDispose { (analyzer as? BarcodeAnalyzer)?.close() } }
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdownNow() } }
     imageCapture.flashMode = flashMode
     var hasCameraPermission by remember {
@@ -2540,8 +2455,6 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
         ScanMode.Document to tr(settings, "Document", "文档"),
         ScanMode.IdCard to tr(settings, "ID", "证件"),
         ScanMode.Book to tr(settings, "Book", "书籍"),
-        ScanMode.QrCode to tr(settings, "QR", "二维码"),
-        ScanMode.Barcode to tr(settings, "Data", "条码"),
     )
     Column(Modifier.fillMaxSize().background(ComposeColor.Black).statusBarsPadding()) {
         // === 顶栏：紧凑 48dp ===
@@ -2657,24 +2570,6 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
             if (state.captureMessage != null) {
                 Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
-            state.codeResult?.let { result ->
-                Card(
-                    Modifier.align(Alignment.BottomCenter).padding(18.dp).fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = ComposeColor(0xEE15191E)),
-                    shape = RoundedCornerShape(10.dp),
-                ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if (state.scanMode == ScanMode.QrCode) tr(settings, "QR code found", "发现二维码") else tr(settings, "Barcode found", "发现条形码"), color = ComposeColor.White, fontWeight = FontWeight.Bold)
-                        Text(result.rawValue, color = ComposeColor.White, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { copyText(context, result.rawValue); model.clearCodeResult() }) { Text(tr(settings, "Copy", "复制")) }
-                            if (result.isWebUrl) TextButton(onClick = { openSafeUrl(context, result.rawValue, settings) }) { Text(tr(settings, "Open link", "打开链接")) }
-                            if (state.scanMode == ScanMode.Barcode) TextButton(onClick = { searchBarcode(context, result.rawValue) }) { Text(tr(settings, "Search", "搜索")) }
-                            TextButton(onClick = model::clearCodeResult) { Text(tr(settings, "Scan again", "继续扫描")) }
-                        }
-                    }
-                }
-            }
         }
         // === 底部 108dp 三层面板 ===
         Column(
@@ -2708,8 +2603,6 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                                  ScanMode.Document -> Icons.Default.Description
                                  ScanMode.IdCard -> Icons.Default.Home
                                  ScanMode.Book -> Icons.Default.Description
-                                 ScanMode.QrCode -> Icons.Default.QrCodeScanner
-                                 ScanMode.Barcode -> Icons.Default.QrCodeScanner
                                  else -> Icons.Default.CameraAlt
                              },
                             null,
@@ -3003,11 +2896,6 @@ fun openSafeUrl(context: Context, value: String, settings: AppSettings) {
     val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(intent) }
         .onFailure { Toast.makeText(context, tr(settings, "No browser can open this link", "没有可打开此链接的浏览器"), Toast.LENGTH_SHORT).show() }
-}
-
-fun searchBarcode(context: Context, value: String) {
-    val uri = Uri.parse("https://www.google.com/search?q=${Uri.encode(value)}")
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }
 
 @Composable
@@ -3797,12 +3685,6 @@ fun qualityLabel(settings: AppSettings, quality: String): String = when (quality
 }
 
 /** Localized display label for persisted save-path values. */
-fun savePathLabel(settings: AppSettings, path: String): String = when (path) {
-    "Internal Storage" -> tr(settings, "Internal Storage", "内部存储")
-    "Documents" -> tr(settings, "Documents", "文档目录")
-    else -> path
-}
-
 @Composable
 fun AdjustScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
@@ -3863,13 +3745,9 @@ fun SaveScreen(state: UiState, model: ClearScanViewModel) {
                 Text(if (state.busy) tr(settings, "Saving...", "保存中...") else tr(settings, "Save", "保存"), fontSize = 18.sp)
             }
             Text(
-                tr(settings, "Saved as images only. You can export a PDF later from the document page.", "只会保存为图片。你可以在文档页随时导出 PDF。"),
+                tr(settings, "Scans are saved as images on this device.", "扫描将以图片形式保存在本机。"),
                 color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp),
             )
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(tr(settings, "Save to", "保存到"), color = Muted, fontSize = 17.sp)
-                Text("${savePathLabel(settings, state.settings.defaultSavePath)}  ›", color = Muted, fontSize = 17.sp)
-            }
         }
     }
 }
@@ -3914,17 +3792,13 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
     val doc = state.selected ?: return
     val context = LocalContext.current
     var renameOpen by remember { mutableStateOf(false) }
-    var passwordOpen by remember { mutableStateOf(false) }
     var moveOpen by remember { mutableStateOf(false) }
-    val exportPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        if (uri != null) model.exportDocumentAsPdf(doc, uri)
-    }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(doc.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${doc.type}    ${formatDate(doc.createdAt)}  •  ${formatSize(doc.sizeBytes)}", color = Muted, fontSize = 12.sp)
+                Text("${formatDate(doc.createdAt)}  •  ${formatSize(doc.sizeBytes)}", color = Muted, fontSize = 12.sp)
             }
             IconButton(onClick = { renameOpen = true }) { Icon(Icons.Default.Edit, null, modifier = Modifier.size(20.dp)) }
         }
@@ -3938,18 +3812,12 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
                 .padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                DetailToolIcon(tr(state.settings, "PDF", "PDF"), Icons.Default.PictureAsPdf) { exportPdf.launch("${doc.title}.pdf") }
                 DetailToolIcon(tr(state.settings, "Share", "分享"), Icons.Default.Share) { model.shareSelected() }
                 DetailToolIcon(tr(state.settings, "Edit", "编辑"), Icons.Default.Edit) { model.toEdit() }
                 DetailToolIcon(tr(state.settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
                 DetailToolIcon(tr(state.settings, "Delete", "删除"), Icons.Default.Delete) { model.deleteSelected() }
             }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = { passwordOpen = true }) {
-                    Icon(Icons.Default.Lock, null, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(tr(state.settings, "Password", "密码"), fontSize = 12.sp)
-                }
                 TextButton(onClick = { moveOpen = true }) {
                     Icon(Icons.Default.Folder, null, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(4.dp))
@@ -3959,11 +3827,6 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
         }
     }
     if (renameOpen) RenameDialog(state.settings, doc.title, onDismiss = { renameOpen = false }, onRename = { model.renameSelected(it); renameOpen = false })
-    if (passwordOpen) PasswordDialog(
-        settings = state.settings, hasPassword = state.settings.passwordMap.containsKey(doc.id),
-        onDismiss = { passwordOpen = false },
-        onSave = { model.setDocumentPassword(doc.id, it); passwordOpen = false },
-    )
     if (moveOpen) AlertDialog(
         onDismissRequest = { moveOpen = false },
         title = { Text(tr(state.settings, "Move document", "移动文档")) },
@@ -3990,9 +3853,9 @@ fun DetailToolIcon(label: String, icon: ImageVector, onClick: () -> Unit) {
 
 @Composable
 fun DocumentPreviewPages(document: Document, settings: AppSettings, model: ClearScanViewModel, modifier: Modifier = Modifier) {
-    var pages by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf<List<Bitmap>>(emptyList()) }
-    var loaded by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf(false) }
-    LaunchedEffect(document.id, document.exportPath, document.pageCount) {
+    var pages by remember(document.id, document.pageCount) { mutableStateOf<List<Bitmap>>(emptyList()) }
+    var loaded by remember(document.id, document.pageCount) { mutableStateOf(false) }
+    LaunchedEffect(document.id, document.pageCount) {
         loaded = false
         pages = model.loadDocumentPages(document)
         loaded = true
@@ -4089,28 +3952,6 @@ fun RenameDialog(settings: AppSettings, current: String, onDismiss: () -> Unit, 
 }
 
 @Composable
-fun PasswordDialog(settings: AppSettings, hasPassword: Boolean, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var password by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (hasPassword) tr(settings, "Update password", "更新密码") else tr(settings, "Set document password", "设置文档密码")) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(tr(settings, "This password is stored locally and protects this document inside ClearScan.", "密码仅保存在本机，用于保护 ClearScan 内的此文档。"), color = Muted, fontSize = 14.sp)
-                OutlinedTextField(password, { password = it }, singleLine = true, placeholder = { Text(tr(settings, "Enter password", "输入密码")) })
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(password) }) { Text(tr(settings, "Save", "保存")) } },
-        dismissButton = {
-            Row {
-                if (hasPassword) TextButton(onClick = { onSave("") }) { Text(tr(settings, "Remove", "移除")) }
-                TextButton(onClick = onDismiss) { Text(tr(settings, "Cancel", "取消")) }
-            }
-        },
-    )
-}
-
-@Composable
 fun ShareScreen(state: UiState, model: ClearScanViewModel) {
     val doc = state.selected ?: return
     val context = LocalContext.current
@@ -4123,9 +3964,9 @@ fun ShareScreen(state: UiState, model: ClearScanViewModel) {
                     Thumbnail(doc.thumbnailPath, Modifier.size(96.dp, 126.dp))
                     Spacer(Modifier.width(24.dp))
                     Column {
-                        Text("${doc.title}.${doc.type.lowercase()}", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text(doc.title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(10.dp))
-                        Text("${doc.type} Document • ${formatSize(doc.sizeBytes)}", color = Muted)
+                        Text("${doc.pageCount} page(s) • ${formatSize(doc.sizeBytes)}", color = Muted)
                         Text(formatDate(doc.createdAt), color = Muted)
                     }
                 }
@@ -4148,7 +3989,7 @@ fun ShareScreen(state: UiState, model: ClearScanViewModel) {
         item { Text(tr(settings, "More options", "更多操作"), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) }
         item {
             Column(Modifier.clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, ComposeColor(0xFFE8EAEE), RoundedCornerShape(14.dp))) {
-                OptionRow(tr(settings, "Save to Files", "保存到文件"), Icons.Default.Folder) { saveToGallery(context, doc) }
+                OptionRow(tr(settings, "Save to Gallery", "保存到相册"), Icons.Default.Folder) { saveToGallery(context, doc) }
                 OptionRow(tr(settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
                 OptionRow(tr(settings, "Open with another app", "用其他应用打开"), Icons.Default.FileOpen) { shareFile(context, doc) }
             }
@@ -4172,7 +4013,7 @@ fun ToolSelectScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
     val required = requiredTypesFor(tool)
     val options = toolOptions(tool)
-    val candidates = state.documents.filter { doc -> required.isEmpty() || doc.type.uppercase() in required }
+    val candidates = state.documents.filter { doc -> required.isEmpty() || "JPG" in required }
     val enoughSelection = state.selectedToolIds.size >= minSelectionFor(tool)
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(toolLabel(tool, settings), onBack = model::back, action = tr(settings, "Run", "执行"), onAction = model::executeActiveTool)
@@ -4247,7 +4088,7 @@ fun SelectableDocumentRow(document: Document, selected: Boolean, onClick: () -> 
         Column(Modifier.weight(1f)) {
             Text(document.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(6.dp))
-            Text("${document.type} • ${document.pageCount} page • ${formatSize(document.sizeBytes)}", color = Muted, fontSize = 13.sp)
+            Text("${document.pageCount} page(s) • ${formatSize(document.sizeBytes)}", color = Muted, fontSize = 13.sp)
         }
         Checkbox(checked = selected, onCheckedChange = null)
     }
@@ -4268,30 +4109,11 @@ fun ToolsScreen(state: UiState, model: ClearScanViewModel) {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ToolCard("ID Card Scan", tr(settings, "ID Card Scan", "证件扫描"), tr(settings, "Scan ID cards quickly\nand accurately", "快速准确扫描\n身份证件"), Icons.Outlined.Badge, Modifier.weight(1f), model)
-                    ToolCard("PDF to Image", tr(settings, "PDF to Image", "PDF 转图片"), tr(settings, "Convert PDF pages\ninto images", "将 PDF 页面\n转换为图片"), Icons.Default.PictureAsPdf, Modifier.weight(1f), model)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    ToolCard("Image to PDF", tr(settings, "Image to PDF", "图片转 PDF"), tr(settings, "Convert images\ninto PDF files", "将图片转换为\nPDF 文件"), Icons.Default.Image, Modifier.weight(1f), model)
-                    ToolCard("PDF Edit", tr(settings, "PDF Edit", "PDF 编辑"), tr(settings, "Edit pages in\nPDF files", "编辑 PDF\n页面"), Icons.Default.Edit, Modifier.weight(1f), model)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ToolCard("Translate", tr(settings, "Translate", "翻译"), tr(settings, "Cloud AI\nmulti-language MT", "云端 AI\n多语言翻译"), Icons.Default.Language, Modifier.weight(1f), model)
-                    ToolCard("Image Format Converter", tr(settings, "Image Format\nConverter", "图片格式\n转换"), tr(settings, "JPEG, PNG, WebP,\nBMP and PDF", "支持 JPEG、PNG、\nWebP、BMP、PDF"), Icons.Default.PhotoLibrary, Modifier.weight(1f), model)
                 }
-            }
-        }
-        item { Text(tr(settings, "More Tools", "更多工具"), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) }
-        item {
-            Column(Modifier.clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, ComposeColor(0xFFE8EAEE), RoundedCornerShape(12.dp))) {
-                listOf(
-                    Triple("Merge PDF", tr(settings, "Merge PDF", "合并 PDF"), Icons.Default.ContentCopy),
-                    Triple("Split PDF", tr(settings, "Split PDF", "拆分 PDF"), Icons.Default.FileOpen),
-                    Triple("Compress PDF", tr(settings, "Compress PDF", "压缩 PDF"), Icons.Default.PictureAsPdf),
-                    Triple("QR Code Scan", tr(settings, "QR Code Scan", "二维码扫描"), Icons.Default.QrCodeScanner),
-                    Triple("Barcode Scan", tr(settings, "Barcode Scan", "条形码扫描"), Icons.Default.Search),
-                    Triple("Watermark", tr(settings, "Watermark", "添加水印"), Icons.Default.WaterDrop),
-                    Triple("Add Signature", tr(settings, "Add Signature", "添加签名"), Icons.Default.Edit),
-                ).forEach { item -> OptionRow(item.second, item.third) { model.runTool(item.first) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    ToolCard("Image Format Converter", tr(settings, "Image Format\nConverter", "图片格式\n转换"), tr(settings, "JPEG, PNG, WebP\nand BMP", "支持 JPEG、PNG、\nWebP、BMP"), Icons.Default.PhotoLibrary, Modifier.weight(1f), model)
+                }
             }
         }
     }
@@ -4430,9 +4252,7 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         item { SettingRow(label = tr(settings, "My Account", "我的账号"), icon = Icons.Default.AccountCircle, value = if (settings.loggedIn) settings.accountName else tr(settings, "Sign in", "登录"), onClick = model::openAccount) }
         item { SettingRow(label = tr(settings, "Language", "语言"), icon = Icons.Default.Language, value = if (settings.language == "Auto") tr(settings, "Auto (system)", "跟随系统") else settings.language, onClick = { activeDialog = "language" }) }
         item { SettingRow(label = tr(settings, "Theme", "主题"), icon = Icons.Default.Brightness6, value = when (settings.theme) { "System" -> tr(settings, "Follow system", "跟随系统"); "Dark" -> tr(settings, "Dark", "夜间"); else -> tr(settings, "Light", "日间") }, onClick = { activeDialog = "theme" }) }
-        item { SettingRow(label = tr(settings, "Default Save Path", "默认保存路径"), icon = Icons.Default.Folder, value = settings.defaultSavePath, onClick = { activeDialog = "path" }) }
         item { SettingRow(label = tr(settings, "Default Filter", "默认滤镜"), icon = Icons.Default.Filter, value = filterLabel(settings, settings.defaultFilter), onClick = { activeDialog = "filter" }) }
-        item { SettingRow(label = tr(settings, "Password Lock", "文件密码锁"), icon = Icons.Default.Lock, value = tr(settings, "${settings.passwordMap.size} protected", "已保护 ${settings.passwordMap.size} 个文件"), onClick = { activeDialog = "password" }) }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(8.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -4484,13 +4304,6 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(theme = it)); activeDialog = null },
     )
-    if (activeDialog == "path") ChoiceDialog(settings,
-        title = tr(settings, "Default Save Path", "默认保存路径"),
-        options = listOf("Internal Storage", "Documents"),
-        selected = settings.defaultSavePath,
-        onDismiss = { activeDialog = null },
-        onSelect = { model.updateSettings(settings.copy(defaultSavePath = it)); activeDialog = null },
-    )
     if (activeDialog == "filter") ChoiceDialog(settings,
         title = tr(settings, "Default Filter", "默认滤镜"),
         options = DocumentFilters,
@@ -4499,7 +4312,6 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(defaultFilter = it)); activeDialog = null },
     )
-    if (activeDialog == "password") PasswordManagerDialog(state, model, onDismiss = { activeDialog = null })
 }
 
 @Composable
@@ -4521,47 +4333,6 @@ fun ChoiceDialog(settings: AppSettings, title: String, options: List<String>, se
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(tr(settings, "Close", "关闭")) } },
-    )
-}
-
-@Composable
-fun PasswordManagerDialog(state: UiState, model: ClearScanViewModel, onDismiss: () -> Unit) {
-    var target by remember { mutableStateOf<Document?>(null) }
-    var password by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(tr(state.settings, "Password Lock", "文件密码锁")) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(tr(state.settings, "Choose a document, then set or remove its local password.", "选择一个文件，然后设置或移除本地密码。"), color = Muted, fontSize = 14.sp)
-                state.documents.take(6).forEach { document ->
-                    Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (target?.id == document.id) Soft else ComposeColor.Transparent).clickable { target = document; password = state.settings.passwordMap[document.id].orEmpty() }.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(if (state.settings.passwordMap.containsKey(document.id)) Icons.Default.Lock else Icons.Default.Description, null, tint = Teal)
-                        Spacer(Modifier.width(10.dp))
-                        Text(document.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-                OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), enabled = target != null, singleLine = true, placeholder = { Text(tr(state.settings, "Password", "密码")) })
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                target?.let { model.setDocumentPassword(it.id, password) }
-                onDismiss()
-            }, enabled = target != null) { Text(tr(state.settings, "Save", "保存")) }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = {
-                    target?.let { model.setDocumentPassword(it.id, "") }
-                    onDismiss()
-                }, enabled = target != null) { Text(tr(state.settings, "Remove", "移除")) }
-                TextButton(onClick = onDismiss) { Text(tr(state.settings, "Cancel", "取消")) }
-            }
-        },
     )
 }
 
@@ -4601,7 +4372,6 @@ fun HelpScreen(state: UiState, model: ClearScanViewModel) {
         item { TopTitle(tr(state.settings, "Help", "帮助"), model::back) }
         item { HelpCard(tr(state.settings, "How do I scan multiple pages?", "如何扫描多页？"), tr(state.settings, "Keep taking photos, tap the right Done button, then confirm each page crop and save them together.", "连续拍摄照片，点击右侧完成按钮，再逐页确认裁剪并统一保存。")) }
         item { HelpCard(tr(state.settings, "How does smart alignment work?", "智能对齐如何工作？"), tr(state.settings, "ClearScan detects page edges locally. You can always drag any corner before continuing.", "ClearScan 会在本机识别页面边缘，你仍可在继续前拖动任意角点。")) }
-        item { HelpCard(tr(state.settings, "How do PDF tools work?", "PDF 工具如何使用？"), tr(state.settings, "Select files first. Every operation saves a new document and keeps the original.", "先选择文件；所有操作都会生成新文档并保留原文件。")) }
         item { HelpCard(tr(state.settings, "Feedback", "问题反馈"), tr(state.settings, "Export App Logs and include your phone model, Android version, and reproduction steps.", "请导出运行日志，并附上手机型号、Android 版本和复现步骤。")) }
     }
 }
@@ -4657,9 +4427,9 @@ fun LegalScreen(state: UiState, model: ClearScanViewModel) {
         item {
             Text(
                 when {
-                    privacy -> tr(settings, "ClearScan stores scans, passwords, account profile data, and settings locally on this device. Files are not uploaded to a server in this clean local edition. Camera and media permissions are used only for scanning, importing, exporting, sharing, and printing documents. You can delete documents from the Docs page and clear local account state with Log Out. Cloud translation, if used, sends the text you submit to the third-party API you configure, and your API key stays on this device.", "ClearScan 会将扫描文件、密码、账号资料和设置保存在本设备本地。纯净本地版不会把文件上传到服务器。相机和媒体权限仅用于扫描、导入、导出、分享和打印文档。你可以在文档页删除文件，也可以通过退出登录清除本地账号状态。若使用云端翻译，所提交的文本将发送到你自行配置的第三方 API，API 密钥仅保存在本设备。")
+                    privacy -> tr(settings, "ClearScan stores scans, account profile data, and settings locally on this device. Files are not uploaded to a server in this clean local edition. Camera and media permissions are used only for scanning, importing, exporting, sharing, and printing documents. You can delete documents from the Docs page and clear local account state with Log Out. Cloud translation, if used, sends the text you submit to the third-party API you configure, and your API key stays on this device.", "ClearScan 会将扫描文件、账号资料和设置保存在本设备本地。纯净本地版不会把文件上传到服务器。相机和媒体权限仅用于扫描、导入、导出、分享和打印文档。你可以在文档页删除文件，也可以通过退出登录清除本地账号状态。若使用云端翻译，所提交的文本将发送到你自行配置的第三方 API，API 密钥仅保存在本设备。")
                     license -> tr(settings, "ClearScan is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License v3.0 (AGPL-3.0-or-later) as published by the Free Software Foundation. This project is based on ClearScan by SuiYueMengHen, originally released under the MIT License; the upstream MIT notice is preserved in the LICENSE file. The full license text is available at https://www.gnu.org/licenses/agpl-3.0.html and in the source repository: https://github.com/ant-cave/ClearScan", "ClearScan 是自由软件：你可以依据自由软件基金会发布的 GNU Affero 通用公共许可证 v3.0（AGPL-3.0-or-later）条款重新分发或修改它。本项目基于 SuiYueMengHen 的 ClearScan（原始许可证为 MIT），上游 MIT 声明保留在 LICENSE 文件中。完整许可证文本见 https://www.gnu.org/licenses/agpl-3.0.html 及源代码仓库：https://github.com/ant-cave/ClearScan")
-                    else -> tr(settings, "ClearScan is provided as a local document scanning tool. You are responsible for the content you scan, export, share, or print. PDF tools create new local files and do not modify originals unless you delete them. Password protection is local to this app and should not be treated as enterprise encryption. By using the app, you agree to use it lawfully and keep backups of important documents.", "ClearScan 是一个本地文档扫描工具。你需要对自己扫描、导出、分享或打印的内容负责。PDF 工具会生成新的本地文件，不会覆盖原文件，除非你主动删除。文件密码保护仅在本应用内本地生效，不应视为企业级加密。使用本应用即表示你同意合法使用，并自行备份重要文档。")
+                    else -> tr(settings, "ClearScan is provided as a local document scanning tool. You are responsible for the content you scan, export, share, or print. By using the app, you agree to use it lawfully and keep backups of important documents.", "ClearScan 是一个本地文档扫描工具。你需要对自己扫描、导出、分享或打印的内容负责。使用本应用即表示你同意合法使用，并自行备份重要文档。")
                 },
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 16.sp,
@@ -4896,50 +4666,6 @@ object ImageProcessor {
         BitmapFactoryCompat.decodeSampled(path, maxDimension)
     }.onFailure { AppLogger.e("Image", "Failed to decode sampled bitmap: $path", it) }.getOrNull()
 
-    fun renderPdfFirstPage(path: String): Bitmap? = renderPdfPages(path, maxPages = 1).firstOrNull()
-
-    fun renderPdfPages(path: String, maxPages: Int = Int.MAX_VALUE): List<Bitmap> = runCatching {
-        val file = File(path)
-        if (!file.exists()) return@runCatching emptyList()
-        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            android.graphics.pdf.PdfRenderer(descriptor).use { renderer ->
-                val pages = mutableListOf<Bitmap>()
-                val count = minOf(renderer.pageCount, maxPages)
-                for (index in 0 until count) {
-                    renderer.openPage(index).use { page ->
-                        val scale = 2
-                        val bitmap = Bitmap.createBitmap(page.width * scale, page.height * scale, Bitmap.Config.ARGB_8888)
-                        val canvas = AndroidCanvas(bitmap)
-                        canvas.drawColor(Color.WHITE)
-                        page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                        pages += bitmap
-                    }
-                }
-                pages
-            }
-        }
-    }.getOrDefault(emptyList())
-
-    fun documentPages(document: Document): List<Bitmap> {
-        return if (document.type == "PDF") {
-            renderPdfPages(document.exportPath)
-        } else {
-            listOfNotNull(readBitmap(document.exportPath) ?: readBitmap(document.thumbnailPath))
-        }
-    }
-
-    fun downsampleForPdf(bitmap: Bitmap, level: String): Bitmap {
-        val maxWidth = when (level) {
-            "Low" -> 820
-            "High" -> 1600
-            else -> 1200
-        }
-        if (bitmap.width <= maxWidth) return bitmap
-        val ratio = maxWidth.toFloat() / bitmap.width.toFloat()
-        val height = (bitmap.height * ratio).roundToInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(bitmap, maxWidth, height, true)
-    }
-
     fun decodeCameraBitmap(path: String, maxDimension: Int = 3072): Bitmap? = runCatching {
         val orientation = ExifInterface(path).getAttributeInt(
             ExifInterface.TAG_ORIENTATION,
@@ -5091,25 +4817,6 @@ object ImageProcessor {
                 out.write(row)
             }
         }
-    }
-
-    fun writePdf(bitmap: Bitmap, file: File) {
-        writePdf(listOf(bitmap), file)
-    }
-
-    fun writePdf(bitmaps: List<Bitmap>, file: File) {
-        file.parentFile?.mkdirs()
-        val pdf = PdfDocument()
-        bitmaps.forEachIndexed { index, bitmap ->
-            val pageInfo = PdfDocument.PageInfo.Builder(595, 842, index + 1).create()
-            val page = pdf.startPage(pageInfo)
-            val rect = RectF(32f, 32f, 563f, 810f)
-            page.canvas.drawColor(Color.WHITE)
-            page.canvas.drawBitmap(bitmap, null, rect, Paint(Paint.ANTI_ALIAS_FLAG))
-            pdf.finishPage(page)
-        }
-        FileOutputStream(file).use { pdf.writeTo(it) }
-        pdf.close()
     }
 
     fun rotate(bitmap: Bitmap, clockwise: Boolean = true): Bitmap {
@@ -5641,47 +5348,6 @@ object ImageProcessor {
         return out
     }
 
-    fun watermark(bitmap: Bitmap, text: String): Bitmap {
-        val out = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = AndroidCanvas(out)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(72, 15, 167, 160)
-            textSize = (bitmap.width * .08f).coerceAtLeast(44f)
-            isFakeBoldText = true
-            textAlign = Paint.Align.CENTER
-        }
-        canvas.rotate(-28f, bitmap.width / 2f, bitmap.height / 2f)
-        canvas.drawText(text, bitmap.width / 2f, bitmap.height / 2f, paint)
-        return out
-    }
-
-    fun addSignature(bitmap: Bitmap): Bitmap {
-        val out = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = AndroidCanvas(out)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(20, 24, 32)
-            strokeWidth = (bitmap.width * .004f).coerceAtLeast(4f)
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-        val y = bitmap.height * .86f
-        val left = bitmap.width * .52f
-        val right = bitmap.width * .84f
-        canvas.drawLine(left, y, right, y, paint)
-        paint.style = Paint.Style.FILL
-        paint.textSize = (bitmap.width * .035f).coerceAtLeast(28f)
-        canvas.drawText("Signed", left, y - 18f, paint)
-        return out
-    }
-
-    fun scanQr(bitmap: Bitmap): String? {
-        val scanner = BarcodeScanning.getClient()
-        return runCatching {
-            val image = InputImage.fromBitmap(bitmap, 0)
-            val barcodes = Tasks.await(scanner.process(image))
-            barcodes.firstOrNull()?.rawValue
-        }.getOrNull()
-    }
 }
 
 object BitmapFactoryCompat {
@@ -5717,34 +5383,40 @@ fun formatDate(time: Long): String {
     return formatter.format(Instant.ofEpochMilli(time))
 }
 
+fun documentImageFiles(context: Context, doc: Document): List<File> =
+    DocumentStore.readMeta(context, doc.id)?.pages
+        ?.mapNotNull { page -> File(page.processedPath).takeIf { it.exists() } }
+        .orEmpty()
+
 fun shareFile(
     context: Context,
     doc: Document,
     targetPackage: String? = null,
     chooserTitle: String = "Share ${doc.title}",
 ) {
-    val file = File(doc.exportPath)
-    if (!file.exists()) {
+    val files = documentImageFiles(context, doc)
+    if (files.isEmpty()) {
         Toast.makeText(context, localized(context, "File is no longer available", "文件已不存在"), Toast.LENGTH_SHORT).show()
-        AppLogger.w("Share", "Missing file for document ${doc.id}: ${doc.exportPath}")
+        AppLogger.w("Share", "Missing files for document ${doc.id}")
         return
     }
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = mimeTypeFor(doc.type)
-        putExtra(Intent.EXTRA_STREAM, uri)
+    val uris = ArrayList(files.map { FileProvider.getUriForFile(context, "${context.packageName}.provider", it) })
+    val single = uris.size == 1
+    val intent = Intent(if (single) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE).apply {
+        type = "image/jpeg"
+        if (single) putExtra(Intent.EXTRA_STREAM, uris[0]) else putExtra(Intent.EXTRA_STREAM, uris)
         putExtra(Intent.EXTRA_TITLE, doc.title)
         putExtra(Intent.EXTRA_SUBJECT, doc.title)
-        clipData = ClipData.newUri(context.contentResolver, doc.title, uri)
+        clipData = ClipData.newUri(context.contentResolver, doc.title, uris[0])
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         if (targetPackage != null) setPackage(targetPackage)
     }
     runCatching {
         if (targetPackage != null) {
-            context.grantUriPermission(targetPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            uris.forEach { context.grantUriPermission(targetPackage, it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         }
         context.startActivity(Intent.createChooser(intent, chooserTitle))
-        AppLogger.i("Share", "Share document ${doc.id} target=${targetPackage ?: "system"} mime=${intent.type}")
+        AppLogger.i("Share", "Share document ${doc.id} target=${targetPackage ?: "system"} pages=${uris.size}")
     }.onFailure { error ->
         AppLogger.e("Share", "Unable to share to ${targetPackage ?: "system"}", error)
         if (targetPackage != null) {
@@ -5757,34 +5429,57 @@ fun shareFile(
 }
 
 fun saveToGallery(context: Context, doc: Document) {
-    val file = File(doc.exportPath)
-    val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-        put(MediaStore.MediaColumns.MIME_TYPE, mimeTypeFor(doc.type))
-        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/ClearScan")
+    val files = documentImageFiles(context, doc)
+    if (files.isEmpty()) {
+        Toast.makeText(context, localized(context, "File is no longer available", "文件已不存在"), Toast.LENGTH_SHORT).show()
+        return
     }
-    val uri = context.contentResolver.insert(MediaStore.Files.getContentUri("external"), values)
-    if (uri != null) {
-        context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-        Toast.makeText(context, localized(context, "Saved to Files", "已保存到文件"), Toast.LENGTH_SHORT).show()
+    var saved = 0
+    files.forEachIndexed { index, file ->
+        val suffix = if (files.size > 1) "-${index + 1}" else ""
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "${doc.title}$suffix.jpg")
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ClearScan")
+        }
+        val uri = context.contentResolver.insert(MediaStore.Images.getContentUri("external"), values)
+        if (uri != null) {
+            context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+            saved++
+        }
+    }
+    if (saved > 0) {
+        Toast.makeText(context, localized(context, "Saved to Gallery", "已保存到相册"), Toast.LENGTH_SHORT).show()
     }
 }
 
 fun printDocument(context: Context, doc: Document) {
+    val files = documentImageFiles(context, doc)
+    if (files.isEmpty()) {
+        Toast.makeText(context, localized(context, "File is no longer available", "文件已不存在"), Toast.LENGTH_SHORT).show()
+        return
+    }
     val printManager = context.getSystemService(Context.PRINT_SERVICE) as PrintManager
     val webView = WebView(context)
     webView.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-    val file = File(doc.exportPath)
     webView.webViewClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String) {
             printManager.print(doc.title, view.createPrintDocumentAdapter(doc.title), PrintAttributes.Builder().build())
         }
     }
-    webView.loadDataWithBaseURL(null, "<html><body><h2>${doc.title}</h2><p>${file.name}</p><p>ClearScan document ready for printing.</p></body></html>", "text/html", "utf-8", null)
+    val imagesHtml = files.joinToString("") { file ->
+        runCatching {
+            val bitmap = ImageProcessor.readBitmap(file.absolutePath, 1600) ?: return@runCatching null
+            val buffer = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, buffer)
+            val base64 = android.util.Base64.encodeToString(buffer.toByteArray(), android.util.Base64.NO_WRAP)
+            "<img style=\"width:100%;margin:8px 0;\" src=\"data:image/jpeg;base64,$base64\" />"
+        }.getOrNull().orEmpty()
+    }
+    webView.loadDataWithBaseURL(null, "<html><body><h2>${doc.title}</h2>$imagesHtml</body></html>", "text/html", "utf-8", null)
 }
 
 fun mimeTypeFor(type: String): String = when (type.uppercase()) {
-    "PDF" -> "application/pdf"
     "PNG" -> "image/png"
     "WEBP" -> "image/webp"
     "BMP" -> "image/bmp"

@@ -12,38 +12,26 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
-enum class ScanMode { Document, Book, IdCard, QrCode, Barcode }
+enum class ScanMode { Document, Book, IdCard }
 
+/**
+ * Basic document info lives in SQLite; everything else (per-page crop/filter
+ * state and image paths) lives in the per-document metadata.json managed by
+ * [DocumentStore]. Folder `documents_legacy` is a v2 leftover kept only while
+ * the one-time file migration runs on first launch.
+ */
 @Entity(tableName = "documents")
 data class Document(
     @PrimaryKey val id: Long,
     val title: String,
-    val type: String,
     val createdAt: Long,
-    val sizeBytes: Long,
     val pageCount: Int,
-    val thumbnailPath: String,
-    val exportPath: String,
+    /** Cached first-page thumbnail path for list rendering; pages live in metadata.json. */
+    val thumbnailPath: String = "",
+    /** Cached total size of the document folder in bytes. */
+    val sizeBytes: Long = 0,
     val folderId: Long? = null,
     val scanMode: String = ScanMode.Document.name,
-)
-
-@Entity(tableName = "scan_pages")
-data class ScanPage(
-    @PrimaryKey val id: Long,
-    val documentId: Long,
-    val originalPath: String,
-    val processedPath: String,
-    val cropPoints: String,
-    val filter: String,
-    val brightness: Float,
-    val contrast: Float,
-    val saturation: Float,
-    val rotation: Int,
-    val pageIndex: Int = 0,
-    val sourceType: String = ScanMode.Document.name,
-    val originalWidth: Int = 0,
-    val originalHeight: Int = 0,
 )
 
 @Entity(tableName = "folders")
@@ -97,12 +85,6 @@ interface DocumentDao {
     @Query("DELETE FROM documents WHERE id = :id")
     suspend fun deleteDocument(id: Long)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertPage(page: ScanPage)
-
-    @Query("SELECT * FROM scan_pages WHERE documentId = :documentId ORDER BY pageIndex, id")
-    suspend fun pages(documentId: Long): List<ScanPage>
-
     @Query("SELECT * FROM folders ORDER BY name COLLATE NOCASE")
     fun observeFolders(): Flow<List<FolderEntity>>
 
@@ -144,8 +126,8 @@ interface DocumentDao {
 }
 
 @Database(
-    entities = [Document::class, ScanPage::class, FolderEntity::class, ScanSessionEntity::class, DraftScanPageEntity::class],
-    version = 2,
+    entities = [Document::class, FolderEntity::class, ScanSessionEntity::class, DraftScanPageEntity::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class ClearScanDatabase : RoomDatabase() {
@@ -163,6 +145,22 @@ abstract class ClearScanDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS folders (id INTEGER NOT NULL, name TEXT NOT NULL, parentId INTEGER, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
                 db.execSQL("CREATE TABLE IF NOT EXISTS scan_sessions (id INTEGER NOT NULL, mode TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(id))")
                 db.execSQL("CREATE TABLE IF NOT EXISTS draft_scan_pages (id INTEGER NOT NULL, sessionId INTEGER NOT NULL, pageIndex INTEGER NOT NULL, originalPath TEXT NOT NULL, processedPath TEXT NOT NULL, thumbnailPath TEXT NOT NULL, cropPoints TEXT NOT NULL, confidence REAL NOT NULL, rotation INTEGER NOT NULL, sourceType TEXT NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        /**
+         * v3 keeps only basic document info in SQLite. The v2 table is renamed
+         * to `documents_legacy` so the ViewModel can copy image files into the
+         * new per-document folders (PDF documents are dropped) before dropping
+         * it. Per-page rows move into each document's metadata.json.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE documents RENAME TO documents_legacy")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS documents (id INTEGER NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL, pageCount INTEGER NOT NULL, thumbnailPath TEXT NOT NULL DEFAULT '', sizeBytes INTEGER NOT NULL DEFAULT 0, folderId INTEGER, scanMode TEXT NOT NULL DEFAULT 'Document', PRIMARY KEY(id))",
+                )
+                db.execSQL("DROP TABLE IF EXISTS scan_pages")
             }
         }
     }

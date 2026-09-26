@@ -22,8 +22,8 @@ android {
         applicationId = "com.clearscan"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.2.0-beta.10"
+        versionCode = 15
+        versionName = "1.2.0-beta.11"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -89,7 +89,6 @@ dependencies {
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.work.runtime)
-    implementation(libs.google.mlkit.barcode)
     implementation(libs.opencv)
     ksp(libs.androidx.room.compiler)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")

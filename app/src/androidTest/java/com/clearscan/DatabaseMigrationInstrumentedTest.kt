@@ -34,4 +34,29 @@ class DatabaseMigrationInstrumentedTest {
         context.deleteDatabase(name)
         Unit
     }
+
+    @Test
+    fun migration2To3_resetsDocumentsAndDropsScanPages() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "migration-2-3.db"
+        context.deleteDatabase(name)
+        SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath(name), null).use { db ->
+            db.execSQL("CREATE TABLE documents (id INTEGER NOT NULL PRIMARY KEY, title TEXT NOT NULL, type TEXT NOT NULL, createdAt INTEGER NOT NULL, sizeBytes INTEGER NOT NULL, pageCount INTEGER NOT NULL, thumbnailPath TEXT NOT NULL, exportPath TEXT NOT NULL, folderId INTEGER, scanMode TEXT NOT NULL)")
+            db.execSQL("CREATE TABLE scan_pages (id INTEGER NOT NULL PRIMARY KEY, documentId INTEGER NOT NULL, pageIndex INTEGER NOT NULL DEFAULT 0, originalPath TEXT NOT NULL, processedPath TEXT NOT NULL, cropPoints TEXT NOT NULL, filter TEXT NOT NULL, brightness REAL NOT NULL, contrast REAL NOT NULL, saturation REAL NOT NULL, rotation INTEGER NOT NULL, sourceType TEXT NOT NULL, originalWidth INTEGER NOT NULL DEFAULT 0, originalHeight INTEGER NOT NULL DEFAULT 0)")
+            db.execSQL("INSERT INTO documents VALUES (9, 'Legacy Image', 'JPG', 9, 200, 2, '/thumb', '/file.jpg', NULL, 'Document')")
+            db.version = 2
+        }
+        val database = Room.databaseBuilder(context, ClearScanDatabase::class.java, name)
+            .addMigrations(ClearScanDatabase.MIGRATION_2_3)
+            .build()
+        // New table starts empty; legacy rows are re-hydrated from files by
+        // DocumentStore.migrateLegacyDocuments on first launch, then dropped.
+        assertNull(database.documentDao().document(9))
+        database.openHelper.writableDatabase
+            .query("SELECT name FROM sqlite_master WHERE type='table' AND name='scan_pages'")
+            .use { cursor -> assertEquals(false, cursor.moveToFirst()) }
+        database.close()
+        context.deleteDatabase(name)
+        Unit
+    }
 }

@@ -20,8 +20,6 @@ class SettingsRepository(private val context: Context) {
         val loggedIn = booleanPreferencesKey("loggedIn")
         val accountName = stringPreferencesKey("accountName")
         val accountEmail = stringPreferencesKey("accountEmail")
-        val passwords = stringPreferencesKey("passwords")
-        val defaultSavePath = stringPreferencesKey("defaultSavePath")
         val defaultFilter = stringPreferencesKey("defaultFilter")
         val autoCheckUpdates = booleanPreferencesKey("autoCheckUpdates")
         val autoDownloadUpdates = booleanPreferencesKey("autoDownloadUpdates")
@@ -33,18 +31,12 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun load(fallback: AppSettings = AppSettings()): AppSettings {
         val values = context.clearScanSettingsDataStore.data.first()
-        val passwords = values[Keys.passwords].orEmpty().split('|').mapNotNull { item ->
-            val parts = item.split(':', limit = 2)
-            parts.firstOrNull()?.toLongOrNull()?.let { id -> id to parts.getOrElse(1) { "" } }
-        }.filter { it.second.isNotBlank() }.toMap()
         return AppSettings(
             language = values[Keys.language] ?: fallback.language,
             theme = values[Keys.theme] ?: fallback.theme,
             loggedIn = values[Keys.loggedIn] ?: fallback.loggedIn,
             accountName = values[Keys.accountName] ?: fallback.accountName,
             accountEmail = values[Keys.accountEmail] ?: fallback.accountEmail,
-            passwordMap = passwords.ifEmpty { fallback.passwordMap },
-            defaultSavePath = values[Keys.defaultSavePath] ?: fallback.defaultSavePath,
             defaultFilter = (values[Keys.defaultFilter] ?: fallback.defaultFilter).takeIf { it in DocumentFilters } ?: "B&W",
             autoCheckUpdates = values[Keys.autoCheckUpdates] ?: fallback.autoCheckUpdates,
             autoDownloadUpdates = values[Keys.autoDownloadUpdates] ?: fallback.autoDownloadUpdates,
@@ -62,8 +54,6 @@ class SettingsRepository(private val context: Context) {
             values[Keys.loggedIn] = settings.loggedIn
             values[Keys.accountName] = settings.accountName
             values[Keys.accountEmail] = settings.accountEmail
-            values[Keys.passwords] = settings.passwordMap.entries.joinToString("|") { "${it.key}:${it.value}" }
-            values[Keys.defaultSavePath] = settings.defaultSavePath
             values[Keys.defaultFilter] = settings.defaultFilter
             values[Keys.autoCheckUpdates] = settings.autoCheckUpdates
             values[Keys.autoDownloadUpdates] = settings.autoDownloadUpdates
