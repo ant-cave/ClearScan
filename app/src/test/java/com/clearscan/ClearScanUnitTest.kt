@@ -135,7 +135,6 @@ class ClearScanUnitTest {
     fun scanModes_haveSeparateBusinessIdentities() {
         assertEquals(PageDetectionProfile.IdCard, detectionProfileFor(ScanMode.IdCard))
         assertEquals(PageDetectionProfile.Document, detectionProfileFor(ScanMode.Book))
-        assertEquals(PageDetectionProfile.Document, detectionProfileFor(ScanMode.IdCard))
     }
 
     @Test
