@@ -1033,7 +1033,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         navFlow.value = navFlow.value.copy(cropPreset = label, cropPoints = defaultCropPoints())
     }
 
-    fun applyCropAndEdit() {
+    fun applyCropAndSave() {
         val previewBitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val sourcePath = navFlow.value.scanSourcePath
         val quarters = navFlow.value.scanRotationQuarters
@@ -1081,12 +1081,11 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 return@launch
             }
             val state = navFlow.value
-            val stack = if (state.backStack.lastOrNull() == Screen.Edit) state.backStack.dropLast(1) else state.backStack
             AppLogger.i("Scan", "Batch crop+filter completed for ${processedPages.size} pages")
             val currentDraft = state.draftPages.getOrNull(state.currentDraftIndex)
             val firstProcessed = processedPages.firstOrNull()
             navFlow.value = state.copy(
-                screen = Screen.Edit,
+                screen = Screen.Save,
                 draftPages = processedPages,
                 processedBitmap = firstProcessed?.let { ImageProcessor.readBitmap(it.processedPath, 1400) } ?: previewBitmap,
                 scanBitmap = firstProcessed?.let { ImageProcessor.readBitmap(it.processedPath, 1400) } ?: previewBitmap,
@@ -2935,7 +2934,7 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
     val dark = isDarkTheme(settings)
     Column(Modifier.fillMaxSize().background(if (dark) ComposeColor(0xFF111317) else MaterialTheme.colorScheme.background).statusBarsPadding()) {
-        TopBar(tr(settings, "Crop", "裁剪"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::applyCropAndEdit, dark = dark)
+        TopBar(tr(settings, "Crop", "裁剪"), onBack = model::back, action = tr(settings, "Next", "下一步"), onAction = model::applyCropAndSave, dark = dark)
         Box(Modifier.weight(1f).fillMaxWidth().padding(10.dp).clipToBounds(), contentAlignment = Alignment.Center) {
             // No fillMaxWidth here: with loose constraints the aspectRatio modifier picks the
             // largest size that fits inside the box, so tall shots can no longer overflow
