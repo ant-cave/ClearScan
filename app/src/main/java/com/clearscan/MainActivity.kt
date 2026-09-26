@@ -2598,9 +2598,6 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                     drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1f)
                     drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1f)
                 }
-                if (state.scanMode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) {
-                    LiveDocumentGuide(state.liveDocumentFrame, Modifier.fillMaxSize())
-                }
                 // 右侧竖向缩放滑块
                 if (boundCamera?.cameraInfo?.hasFlashUnit() == true || boundCamera != null) {
                     Column(
@@ -2948,39 +2945,6 @@ fun CameraPreview(
             previewView
         },
     )
-}
-
-@Composable
-private fun LiveDocumentGuide(frame: LiveDocumentFrame?, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val fallback = listOf(
-            Offset(size.width * .12f, size.height * .16f),
-            Offset(size.width * .88f, size.height * .16f),
-            Offset(size.width * .88f, size.height * .84f),
-            Offset(size.width * .12f, size.height * .84f),
-        )
-        val points = if (frame?.corners?.size == 4) {
-            val frameWidth = frame.imageAspectRatio
-            val frameHeight = 1f
-            val scale = minOf(size.width / frameWidth, size.height / frameHeight)
-            val shownWidth = frameWidth * scale
-            val shownHeight = frameHeight * scale
-            val left = (size.width - shownWidth) / 2f
-            val top = (size.height - shownHeight) / 2f
-            frame.corners.map { Offset(left + it.x * shownWidth, top + it.y * shownHeight) }
-        } else fallback
-        val color = if (frame == null) ComposeColor.White.copy(alpha = .48f) else if (frame.stable) Teal else ComposeColor(0xFFFFC857)
-        val path = Path().apply {
-            moveTo(points[0].x, points[0].y)
-            points.drop(1).forEach { lineTo(it.x, it.y) }
-            close()
-        }
-        drawPath(path, color, style = Stroke(width = if (frame?.stable == true) 6f else 4f))
-        points.forEach { point ->
-            drawCircle(ComposeColor.White, radius = 8f, center = point)
-            drawCircle(color, radius = 8f, center = point, style = Stroke(width = 4f))
-        }
-    }
 }
 
 fun takeRealPhoto(context: Context, imageCapture: ImageCapture, model: ClearScanViewModel, settings: AppSettings) {
